@@ -20,33 +20,51 @@ app.get("/", (req, res) => res.send("Bot online ✅"));
 app.listen(process.env.PORT || 3000, () => console.log("Web OK"));
 
 // ==========================
-// 🗄️ BANCO (SQLite)
+// 🗄️ BANCO (SQLite) - INIT GARANTIDO
 // ==========================
-const db = new sqlite3.Database("./farmes.db");
+const db = new sqlite3.Database("./farmes.db", (err) => {
+  if (err) console.error("Erro ao abrir DB:", err);
+});
 
-// Tabelas
-db.run(`
-CREATE TABLE IF NOT EXISTS usuarios (
-  id TEXT PRIMARY KEY,
-  ultimoDia TEXT,
-  entregueHoje INTEGER,
-  divida INTEGER
-)`);
+db.on("error", (err) => console.error("DB error:", err));
 
-db.run(`
-CREATE TABLE IF NOT EXISTS historico (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  userId TEXT,
-  tipo TEXT,
-  quantidade INTEGER,
-  status TEXT,
-  data TEXT,
-  msgId TEXT,
-  gerenteId TEXT
-)`);
+function initDB() {
+  return new Promise((resolve, reject) => {
+    db.exec(
+      `
+      PRAGMA journal_mode = WAL;
 
-// Índice pra buscar msgId rápido (anti-dupla aprovação persistente)
-db.run(`CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico(msgId)`);
+      CREATE TABLE IF NOT EXISTS usuarios (
+        id TEXT PRIMARY KEY,
+        ultimoDia TEXT,
+        entregueHoje INTEGER,
+        divida INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS historico (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        userId TEXT,
+        tipo TEXT,
+        quantidade INTEGER,
+        status TEXT,
+        data TEXT,
+        msgId TEXT,
+        gerenteId TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico(msgId);
+      `,
+      (err) => {
+        if (err) {
+          console.error("Erro criando tabelas:", err);
+          return reject(err);
+        }
+        console.log("DB OK (tabelas prontas)");
+        resolve();
+      }
+    );
+  });
+}
 
 // ==========================
 // 🤖 DISCORD CLIENT
@@ -58,7 +76,6 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
   ],
-  // 🔥 importante pra DM em alguns casos
   partials: [Partials.Channel],
 });
 
@@ -72,8 +89,10 @@ client.once("ready", () => {
 function getRoles(guild, member) {
   const gerenteRole = guild.roles.cache.find((r) => r.name === "Gerente");
   const role00 = guild.roles.cache.find((r) => r.name === "00");
+
   const isGerente = gerenteRole ? member.roles.cache.has(gerenteRole.id) : false;
   const is00 = role00 ? member.roles.cache.has(role00.id) : false;
+
   return { isGerente, is00 };
 }
 
@@ -102,7 +121,6 @@ function getLogChannel(guild) {
 
   if (byId) return byId;
 
-  // fallback por nome
   return guild.channels.cache.find((c) => c.name === "logs-farme") || null;
 }
 
@@ -121,7 +139,10 @@ client.on("messageCreate", async (message) => {
   if (message.content === "!painel") {
     const embed = new EmbedBuilder()
       .setColor("#2b2d31")
-      .setAuthor({ name: "Central de Controle", iconURL: message.guild.iconURL() })
+      .setAuthor({
+        name: "Central de Controle",
+        iconURL: message.guild.iconURL(),
+      })
       .setDescription("Selecione uma opção no menu abaixo.")
       .setFooter({ text: `Solicitado por ${message.author.username}` })
       .setTimestamp();
@@ -135,8 +156,12 @@ client.on("messageCreate", async (message) => {
       { label: "Meu Histórico", value: "meu_historico", emoji: "🧾" },
     ];
 
-    if (isGerente || is00) options.push({ label: "Devedores", value: "ver_devedores", emoji: "📋" });
-    if (is00) options.push({ label: "Alterar Saldo", value: "alterar_saldo", emoji: "⚙️" });
+    if (isGerente || is00) {
+      options.push({ label: "Devedores", value: "ver_devedores", emoji: "📋" });
+    }
+    if (is00) {
+      options.push({ label: "Alterar Saldo", value: "alterar_saldo", emoji: "⚙️" });
+    }
 
     menu.addOptions(options);
 
@@ -162,6 +187,7 @@ client.on("messageCreate", async (message) => {
     const hojeDia = todayKey();
 
     db.get(`SELECT * FROM usuarios WHERE id = ?`, [user.id], (err, row) => {
+      if (err) return message.reply("Erro no banco.");
       if (!row) return message.reply("Usuário sem registro ainda.");
 
       let entregueHoje = row.entregueHoje;
@@ -183,7 +209,8 @@ client.on("messageCreate", async (message) => {
       );
 
       db.run(
-        `INSERT INTO historico (userId, tipo, quantidade, status, data, msgId, gerenteId) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO historico (userId, tipo, quantidade, status, data, msgId, gerenteId)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [user.id, "ajuste", valor, "AJUSTE", nowBR(), "manual", message.author.id]
       );
 
@@ -276,7 +303,7 @@ client.on("interactionCreate", async (interaction) => {
           }
 
           const txt = rows
-            .map((r) => `• **${r.status}** | ${r.tipo.toUpperCase()} | ${r.quantidade} | ${r.data}`)
+            .map((r) => `• **${r.status}** | ${String(r.tipo).toUpperCase()} | ${r.quantidade} | ${r.data}`)
             .join("\n");
 
           return interaction.reply({ content: `🧾 **Últimos registros:**\n\n${txt}`, ephemeral: true });
@@ -324,15 +351,13 @@ client.on("interactionCreate", async (interaction) => {
     return interaction.reply({ content: "❌ Apenas Gerentes/00 podem usar.", ephemeral: true });
   }
 
-  // ✅ Anti-dupla aprovação persistente:
-  // se já existir histórico com esse msgId e status APROVADO/NEGADO, bloqueia
   const msgId = interaction.message.id;
 
-  // responder rápido pra não dar "interação falhou"
   await interaction.deferUpdate();
 
+  // ✅ Anti-dupla persistente no DB
   db.get(
-    `SELECT id, status FROM historico WHERE msgId = ? AND (status = 'APROVADO' OR status = 'NEGADO') LIMIT 1`,
+    `SELECT id FROM historico WHERE msgId = ? AND (status = 'APROVADO' OR status = 'NEGADO') LIMIT 1`,
     [msgId],
     async (err, already) => {
       if (already) {
@@ -374,7 +399,8 @@ client.on("interactionCreate", async (interaction) => {
           );
 
           db.run(
-            `INSERT INTO historico (userId, tipo, quantidade, status, data, msgId, gerenteId) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO historico (userId, tipo, quantidade, status, data, msgId, gerenteId)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
             [userId, tipo, quantidade, "APROVADO", dataAgora, msgId, interaction.user.id]
           );
 
@@ -408,7 +434,8 @@ client.on("interactionCreate", async (interaction) => {
       // ❌ NEGAR
       if (acao === "negar") {
         db.run(
-          `INSERT INTO historico (userId, tipo, quantidade, status, data, msgId, gerenteId) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO historico (userId, tipo, quantidade, status, data, msgId, gerenteId)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [userId, tipo, quantidade, "NEGADO", dataAgora, msgId, interaction.user.id]
         );
 
@@ -440,6 +467,18 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 // ==========================
-// 🔐 LOGIN (Render)
+// 🔐 START (somente depois do DB OK)
 // ==========================
-client.login(process.env.DISCORD_TOKEN);
+(async () => {
+  try {
+    await initDB();
+    if (!process.env.DISCORD_TOKEN) {
+      console.error("Faltando DISCORD_TOKEN nas env vars do Render!");
+      process.exit(1);
+    }
+    client.login(process.env.DISCORD_TOKEN);
+  } catch (e) {
+    console.error("Falha ao iniciar:", e);
+    process.exit(1);
+  }
+})();
