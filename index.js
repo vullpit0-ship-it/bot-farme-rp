@@ -22,6 +22,9 @@ const ROLE_00_ID = "1477850489189044365";
 const LOG_CHANNEL_ID = "1477800551340310651";
 const ENVIO_FARME_CHANNEL_ID = "1477777883714818098";
 
+// ✅ Opcional: logo custom pro log (Render -> Environment -> LOGO_URL)
+const LOGO_URL = process.env.LOGO_URL || null;
+
 // ==========================
 // 🌐 WEB
 // ==========================
@@ -58,6 +61,15 @@ function tomorrowKey() {
   return d.toDateString();
 }
 
+// thumbnail do embed (logo custom OU avatar do bot)
+function getThumb(interactionOrClient) {
+  const avatar =
+    interactionOrClient?.user?.displayAvatarURL?.() ||
+    interactionOrClient?.client?.user?.displayAvatarURL?.() ||
+    null;
+  return LOGO_URL || avatar || null;
+}
+
 // ==========================
 // 🧱 INIT DB (COM MIGRAÇÃO)
 // ==========================
@@ -88,7 +100,7 @@ async function initDB() {
     );
   `);
 
-  // 2) Migrações seguras (caso já exista tabela antiga sem colunas)
+  // 2) Migrações seguras
   // usuarios
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "papelHoje" INTEGER;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "sementesHoje" INTEGER;`);
@@ -108,6 +120,10 @@ async function initDB() {
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS aplicado INTEGER;`);
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS carry INTEGER;`);
 
+  // ✅ para ranking semanal (não depende do "dia" texto)
+  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
+  await pool.query(`UPDATE historico SET created_at = NOW() WHERE created_at IS NULL;`);
+
   // 3) Defaults (evita nulls)
   await pool.query(
     `
@@ -122,17 +138,21 @@ async function initDB() {
     [todayKey()]
   );
 
-  // 4) Índices (com aspas + try/catch pra não derrubar o bot)
+  // 4) Índices (não derruba o bot)
   try {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico ("msgId");`);
   } catch (e) {
     console.error("Aviso: falha ao criar idx_historico_msgId:", e?.message || e);
   }
-
   try {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_dia ON historico ("dia");`);
   } catch (e) {
     console.error("Aviso: falha ao criar idx_historico_dia:", e?.message || e);
+  }
+  try {
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_created_at ON historico (created_at);`);
+  } catch (e) {
+    console.error("Aviso: falha ao criar idx_historico_created_at:", e?.message || e);
   }
 
   console.log("DB OK (PostgreSQL / Supabase)");
@@ -150,7 +170,6 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-// ✅ discord.js v15: evento correto
 client.once("clientReady", () => {
   console.log("Bot online como", client.user?.tag);
 });
@@ -235,7 +254,6 @@ async function alreadyProcessed(msgId) {
 
 // aplica aprovação respeitando limite 100/dia por tipo e joga excesso para carry
 async function applyFarm(userId, tipo, quantidade) {
-  // garante rollover do dia
   const u0 = await rollToToday(userId);
 
   let papelHoje = Number(u0.papelHoje || 0);
@@ -281,13 +299,64 @@ async function applyFarm(userId, tipo, quantidade) {
 }
 
 // ==========================
+// 📊 RANKING APROVAÇÕES
+// ==========================
+async function getRankingAprovacoesDia(diaStr) {
+  const { rows } = await pool.query(
+    `
+    SELECT "gerenteId",
+           COUNT(*)::int AS aprovacoes,
+           COALESCE(SUM(COALESCE(aplicado,0)),0)::int AS aplicado_total,
+           COALESCE(SUM(COALESCE(carry,0)),0)::int AS carry_total
+    FROM historico
+    WHERE status = 'APROVADO'
+      AND "gerenteId" IS NOT NULL
+      AND dia = $1
+    GROUP BY "gerenteId"
+    ORDER BY aprovacoes DESC, aplicado_total DESC
+    LIMIT 10
+  `,
+    [diaStr]
+  );
+  return rows;
+}
+
+async function getRankingAprovacoesSemana() {
+  const { rows } = await pool.query(
+    `
+    SELECT "gerenteId",
+           COUNT(*)::int AS aprovacoes,
+           COALESCE(SUM(COALESCE(aplicado,0)),0)::int AS aplicado_total,
+           COALESCE(SUM(COALESCE(carry,0)),0)::int AS carry_total
+    FROM historico
+    WHERE status = 'APROVADO'
+      AND "gerenteId" IS NOT NULL
+      AND created_at >= NOW() - INTERVAL '7 days'
+    GROUP BY "gerenteId"
+    ORDER BY aprovacoes DESC, aplicado_total DESC
+    LIMIT 10
+  `
+  );
+  return rows;
+}
+
+function formatRanking(rows) {
+  if (!rows || rows.length === 0) return "Nenhuma aprovação encontrada.";
+  return rows
+    .map((r, i) => {
+      const user = `<@${r.gerenteId}>`;
+      return `**${i + 1}.** ${user} — ✅ ${r.aprovacoes} | aplicado **${r.aplicado_total}** | carry **${r.carry_total}**`;
+    })
+    .join("\n");
+}
+
+// ==========================
 // 📩 MESSAGE
 // ==========================
 client.on("messageCreate", async (message) => {
   try {
     if (!message.guild || message.author.bot) return;
 
-    // ✅ LOG IMPORTANTE
     console.log("[MSG]", message.channel.id, message.author.tag, JSON.stringify(message.content));
 
     const member = await message.guild.members.fetch(message.author.id);
@@ -318,11 +387,42 @@ client.on("messageCreate", async (message) => {
           .setFooter({ text: is00 ? "Você é 00 (tem !editar)" : isGerente ? "Você é Gerente" : "Membro" })
           .setTimestamp();
 
+        const thumb = getThumb(client);
+        if (thumb) embed.setThumbnail(thumb);
+
         return message.reply({ embeds: [embed] });
       } catch (e) {
         console.error("Falha ao enviar embed do painel:", e);
         return message.reply({ content: `📌 **Painel do Farme**\n\n${txt}` });
       }
+    }
+
+    // ======================
+    // 📊 RANKING APROVAÇÕES (Gerente/00)
+    // ======================
+    if (lower === "!rankaprov" || lower === "!rankingaprov" || lower === "!rankingaprovacoes") {
+      if (!isGerente && !is00) return message.reply("❌ Apenas **Gerente/00** pode usar.");
+
+      const hoje = todayKey();
+      const [rDia, rSemana] = await Promise.all([
+        getRankingAprovacoesDia(hoje),
+        getRankingAprovacoesSemana(),
+      ]);
+
+      const embed = new EmbedBuilder()
+        .setColor("#2b2d31")
+        .setTitle("🏆 Ranking de Aprovações (Gerentes/00)")
+        .addFields(
+          { name: `📅 Hoje (${hoje})`, value: formatRanking(rDia) },
+          { name: "🗓️ Últimos 7 dias", value: formatRanking(rSemana) }
+        )
+        .setFooter({ text: "Comando: !rankaprov" })
+        .setTimestamp();
+
+      const thumb = getThumb(client);
+      if (thumb) embed.setThumbnail(thumb);
+
+      return message.reply({ embeds: [embed] });
     }
 
     // ======================
@@ -462,6 +562,26 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.followUp({ content: "⚠️ Dados inválidos nesse botão.", ephemeral: true });
     }
 
+    // helper embed pro canal de log
+    const sendLogEmbed = async (title, description) => {
+      if (!logChannel) return;
+      const embed = new EmbedBuilder()
+        .setColor("#2b2d31")
+        .setTitle(title)
+        .setDescription(description)
+        .setTimestamp();
+
+      const thumb = getThumb(interaction);
+      if (thumb) embed.setThumbnail(thumb);
+
+      try {
+        await logChannel.send({ embeds: [embed] });
+      } catch {
+        // fallback texto
+        await logChannel.send(description).catch(() => null);
+      }
+    };
+
     if (acao === "aprovar") {
       const result = await applyFarm(userId, tipo, quantidade);
       const u = result.user;
@@ -488,9 +608,14 @@ client.on("interactionCreate", async (interaction) => {
         components: [],
       });
 
-      logChannel?.send(
-        `✅ APROVADO: <@${userId}> +${quantidade} (${tipo}) | aplicado ${result.aplicado} / carry ${result.carry} | Por: <@${interaction.user.id}>`
-      ).catch(() => null);
+      await sendLogEmbed(
+        "✅ FARME APROVADO",
+        `👤 Usuário: <@${userId}>\n` +
+          `🧾 Tipo: **${tipo.toUpperCase()}**\n` +
+          `📦 Quantidade: **${quantidade}**\n` +
+          `➡️ Aplicado: **${result.aplicado}** | Carry: **${result.carry}**\n` +
+          `🛡️ Aprovado por: <@${interaction.user.id}>`
+      );
 
       return;
     }
@@ -513,9 +638,13 @@ client.on("interactionCreate", async (interaction) => {
         components: [],
       });
 
-      logChannel?.send(
-        `❌ NEGADO: <@${userId}> ${quantidade} (${tipo}) | Por: <@${interaction.user.id}>`
-      ).catch(() => null);
+      await sendLogEmbed(
+        "❌ FARME NEGADO",
+        `👤 Usuário: <@${userId}>\n` +
+          `🧾 Tipo: **${tipo.toUpperCase()}**\n` +
+          `📦 Quantidade: **${quantidade}**\n` +
+          `🛡️ Negado por: <@${interaction.user.id}>`
+      );
 
       return;
     }
