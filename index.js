@@ -74,7 +74,6 @@ function getThumb(interactionOrClient) {
 // 🧱 INIT DB (COM MIGRAÇÃO)
 // ==========================
 async function initDB() {
-  // 1) Cria tabelas (se não existirem)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS usuarios (
       id TEXT PRIMARY KEY,
@@ -100,7 +99,6 @@ async function initDB() {
     );
   `);
 
-  // 2) Migrações seguras
   // usuarios
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "papelHoje" INTEGER;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "sementesHoje" INTEGER;`);
@@ -120,11 +118,11 @@ async function initDB() {
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS aplicado INTEGER;`);
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS carry INTEGER;`);
 
-  // ✅ para ranking semanal (não depende do "dia" texto)
+  // ranking semanal
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
   await pool.query(`UPDATE historico SET created_at = NOW() WHERE created_at IS NULL;`);
 
-  // 3) Defaults (evita nulls)
+  // defaults
   await pool.query(
     `
     UPDATE usuarios
@@ -138,7 +136,7 @@ async function initDB() {
     [todayKey()]
   );
 
-  // 4) Índices (não derruba o bot)
+  // índices
   try {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico ("msgId");`);
   } catch (e) {
@@ -214,7 +212,7 @@ async function rollToToday(userId) {
   const papelCarry = Number(u.papelCarry || 0);
   const sementesCarry = Number(u.sementesCarry || 0);
 
-  // entra no novo dia já contando carry (até 100), resto continua em carry para próximos dias
+  // entra no novo dia já contando extra (até 100), resto continua em extra
   const papelHoje = Math.min(100, papelCarry);
   const sementesHoje = Math.min(100, sementesCarry);
 
@@ -252,7 +250,7 @@ async function alreadyProcessed(msgId) {
   return !!rows[0];
 }
 
-// aplica aprovação respeitando limite 100/dia por tipo e joga excesso para carry
+// aplica aprovação respeitando limite 100/dia por tipo e joga excesso para extra
 async function applyFarm(userId, tipo, quantidade) {
   const u0 = await rollToToday(userId);
 
@@ -299,7 +297,7 @@ async function applyFarm(userId, tipo, quantidade) {
 }
 
 // ==========================
-// 📊 RANKING APROVAÇÕES
+// 📊 RANKING APROVAÇÕES (Gerente/00)
 // ==========================
 async function getRankingAprovacoesDia(diaStr) {
   const { rows } = await pool.query(
@@ -307,7 +305,7 @@ async function getRankingAprovacoesDia(diaStr) {
     SELECT "gerenteId",
            COUNT(*)::int AS aprovacoes,
            COALESCE(SUM(COALESCE(aplicado,0)),0)::int AS aplicado_total,
-           COALESCE(SUM(COALESCE(carry,0)),0)::int AS carry_total
+           COALESCE(SUM(COALESCE(carry,0)),0)::int AS extra_total
     FROM historico
     WHERE status = 'APROVADO'
       AND "gerenteId" IS NOT NULL
@@ -327,7 +325,7 @@ async function getRankingAprovacoesSemana() {
     SELECT "gerenteId",
            COUNT(*)::int AS aprovacoes,
            COALESCE(SUM(COALESCE(aplicado,0)),0)::int AS aplicado_total,
-           COALESCE(SUM(COALESCE(carry,0)),0)::int AS carry_total
+           COALESCE(SUM(COALESCE(carry,0)),0)::int AS extra_total
     FROM historico
     WHERE status = 'APROVADO'
       AND "gerenteId" IS NOT NULL
@@ -340,13 +338,63 @@ async function getRankingAprovacoesSemana() {
   return rows;
 }
 
-function formatRanking(rows) {
+function formatRankingAprov(rows) {
   if (!rows || rows.length === 0) return "Nenhuma aprovação encontrada.";
   return rows
     .map((r, i) => {
       const user = `<@${r.gerenteId}>`;
-      return `**${i + 1}.** ${user} — ✅ ${r.aprovacoes} | aplicado **${r.aplicado_total}** | carry **${r.carry_total}**`;
+      return `**${i + 1}.** ${user} — ✅ ${r.aprovacoes} | aplicado **${r.aplicado_total}** | extra **${r.extra_total}**`;
     })
+    .join("\n");
+}
+
+// ==========================
+// 🏆 RANKING GERAL (Papel/Sementes)
+// ==========================
+// Top 10 por tipo, por DIA
+async function getRankingTipoDia(diaStr, tipo) {
+  const { rows } = await pool.query(
+    `
+    SELECT "userId",
+           COALESCE(SUM(COALESCE(aplicado,0)),0)::int AS aplicado_total,
+           COALESCE(SUM(COALESCE(carry,0)),0)::int AS extra_total
+    FROM historico
+    WHERE status='APROVADO'
+      AND tipo=$2
+      AND dia=$1
+    GROUP BY "userId"
+    ORDER BY aplicado_total DESC, extra_total DESC
+    LIMIT 10
+  `,
+    [diaStr, tipo]
+  );
+  return rows;
+}
+
+// Top 10 por tipo, por SEMANA (7 dias)
+async function getRankingTipoSemana(tipo) {
+  const { rows } = await pool.query(
+    `
+    SELECT "userId",
+           COALESCE(SUM(COALESCE(aplicado,0)),0)::int AS aplicado_total,
+           COALESCE(SUM(COALESCE(carry,0)),0)::int AS extra_total
+    FROM historico
+    WHERE status='APROVADO'
+      AND tipo=$1
+      AND created_at >= NOW() - INTERVAL '7 days'
+    GROUP BY "userId"
+    ORDER BY aplicado_total DESC, extra_total DESC
+    LIMIT 10
+  `,
+    [tipo]
+  );
+  return rows;
+}
+
+function formatRankingUsers(rows) {
+  if (!rows || rows.length === 0) return "Sem dados ainda.";
+  return rows
+    .map((r, i) => `**${i + 1}.** <@${r.userId}> — aplicado **${r.aplicado_total}** | extra **${r.extra_total}**`)
     .join("\n");
 }
 
@@ -374,8 +422,8 @@ client.on("messageCreate", async (message) => {
 
       const txt =
         `👤 ${message.author}\n\n` +
-        `📄 **Papel:** ${u.papelHoje}/100 (carry: ${u.papelCarry})\n` +
-        `🌱 **Sementes:** ${u.sementesHoje}/100 (carry: ${u.sementesCarry})\n\n` +
+        `📄 **Papel:** ${u.papelHoje}/100 (extra: ${u.papelCarry})\n` +
+        `🌱 **Sementes:** ${u.sementesHoje}/100 (extra: ${u.sementesCarry})\n\n` +
         `🕒 Dia: **${u.ultimoDia}**\n` +
         `✅ Use \`!farme papel 10\` ou \`!farme sementes 10\` no canal de envio.`;
 
@@ -398,23 +446,51 @@ client.on("messageCreate", async (message) => {
     }
 
     // ======================
+    // 🏆 RANKING GERAL (QUALQUER UM)
+    // ======================
+    if (lower === "!ranking") {
+      const hoje = todayKey();
+
+      const [papelDia, sementesDia, papelSemana, sementesSemana] = await Promise.all([
+        getRankingTipoDia(hoje, "papel"),
+        getRankingTipoDia(hoje, "sementes"),
+        getRankingTipoSemana("papel"),
+        getRankingTipoSemana("sementes"),
+      ]);
+
+      const embed = new EmbedBuilder()
+        .setColor("#2b2d31")
+        .setTitle("🏆 Ranking de Farme (Top 10)")
+        .addFields(
+          { name: `📅 PAPEL — Hoje (${hoje})`, value: formatRankingUsers(papelDia) },
+          { name: `📅 SEMENTES — Hoje (${hoje})`, value: formatRankingUsers(sementesDia) },
+          { name: "🗓️ PAPEL — Últimos 7 dias", value: formatRankingUsers(papelSemana) },
+          { name: "🗓️ SEMENTES — Últimos 7 dias", value: formatRankingUsers(sementesSemana) },
+        )
+        .setFooter({ text: "Comando: !ranking" })
+        .setTimestamp();
+
+      const thumb = getThumb(client);
+      if (thumb) embed.setThumbnail(thumb);
+
+      return message.reply({ embeds: [embed] });
+    }
+
+    // ======================
     // 📊 RANKING APROVAÇÕES (Gerente/00)
     // ======================
     if (lower === "!rankaprov" || lower === "!rankingaprov" || lower === "!rankingaprovacoes") {
       if (!isGerente && !is00) return message.reply("❌ Apenas **Gerente/00** pode usar.");
 
       const hoje = todayKey();
-      const [rDia, rSemana] = await Promise.all([
-        getRankingAprovacoesDia(hoje),
-        getRankingAprovacoesSemana(),
-      ]);
+      const [rDia, rSemana] = await Promise.all([getRankingAprovacoesDia(hoje), getRankingAprovacoesSemana()]);
 
       const embed = new EmbedBuilder()
         .setColor("#2b2d31")
         .setTitle("🏆 Ranking de Aprovações (Gerentes/00)")
         .addFields(
-          { name: `📅 Hoje (${hoje})`, value: formatRanking(rDia) },
-          { name: "🗓️ Últimos 7 dias", value: formatRanking(rSemana) }
+          { name: `📅 Hoje (${hoje})`, value: formatRankingAprov(rDia) },
+          { name: "🗓️ Últimos 7 dias", value: formatRankingAprov(rSemana) }
         )
         .setFooter({ text: "Comando: !rankaprov" })
         .setTimestamp();
@@ -562,7 +638,6 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.followUp({ content: "⚠️ Dados inválidos nesse botão.", ephemeral: true });
     }
 
-    // helper embed pro canal de log
     const sendLogEmbed = async (title, description) => {
       if (!logChannel) return;
       const embed = new EmbedBuilder()
@@ -577,7 +652,6 @@ client.on("interactionCreate", async (interaction) => {
       try {
         await logChannel.send({ embeds: [embed] });
       } catch {
-        // fallback texto
         await logChannel.send(description).catch(() => null);
       }
     };
@@ -602,9 +676,9 @@ client.on("interactionCreate", async (interaction) => {
         content:
           `✅ **Aprovado**\n` +
           `📦 ${tipo.toUpperCase()} • ${quantidade}\n` +
-          `➡️ Aplicado hoje: **${result.aplicado}** | Carry (amanhã): **${result.carry}**\n\n` +
-          `📄 Papel: **${u.papelHoje}/100** (carry: ${u.papelCarry})\n` +
-          `🌱 Sementes: **${u.sementesHoje}/100** (carry: ${u.sementesCarry})`,
+          `➡️ Aplicado hoje: **${result.aplicado}** | Extra (amanhã): **${result.carry}**\n\n` +
+          `📄 Papel: **${u.papelHoje}/100** (extra: ${u.papelCarry})\n` +
+          `🌱 Sementes: **${u.sementesHoje}/100** (extra: ${u.sementesCarry})`,
         components: [],
       });
 
@@ -613,7 +687,7 @@ client.on("interactionCreate", async (interaction) => {
         `👤 Usuário: <@${userId}>\n` +
           `🧾 Tipo: **${tipo.toUpperCase()}**\n` +
           `📦 Quantidade: **${quantidade}**\n` +
-          `➡️ Aplicado: **${result.aplicado}** | Carry: **${result.carry}**\n` +
+          `➡️ Aplicado: **${result.aplicado}** | Extra: **${result.carry}**\n` +
           `🛡️ Aprovado por: <@${interaction.user.id}>`
       );
 
