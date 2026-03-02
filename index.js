@@ -118,7 +118,7 @@ async function initDB() {
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS aplicado INTEGER;`);
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS carry INTEGER;`);
 
-  // ranking semanal
+  // ranking semanal / histórico (mantém, não atrapalha)
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
   await pool.query(`UPDATE historico SET created_at = NOW() WHERE created_at IS NULL;`);
 
@@ -202,7 +202,7 @@ async function ensureUser(userId) {
   return res.rows[0];
 }
 
-// quando vira o dia: começa o dia com o carry (excesso de ontem)
+// quando vira o dia: começa o dia com o extra (excesso de ontem)
 async function rollToToday(userId) {
   const hoje = todayKey();
   const u = await ensureUser(userId);
@@ -297,7 +297,7 @@ async function applyFarm(userId, tipo, quantidade) {
 }
 
 // ==========================
-// 📊 RANKING APROVAÇÕES (Gerente/00)
+// 📊 RANKING APROVAÇÕES (Gerente/00) - mantém
 // ==========================
 async function getRankingAprovacoesDia(diaStr) {
   const { rows } = await pool.query(
@@ -349,56 +349,6 @@ function formatRankingAprov(rows) {
 }
 
 // ==========================
-// 🏆 RANKING GERAL (Papel/Sementes)
-// ==========================
-// Top 10 por tipo, por DIA
-async function getRankingTipoDia(diaStr, tipo) {
-  const { rows } = await pool.query(
-    `
-    SELECT "userId",
-           COALESCE(SUM(COALESCE(aplicado,0)),0)::int AS aplicado_total,
-           COALESCE(SUM(COALESCE(carry,0)),0)::int AS extra_total
-    FROM historico
-    WHERE status='APROVADO'
-      AND tipo=$2
-      AND dia=$1
-    GROUP BY "userId"
-    ORDER BY aplicado_total DESC, extra_total DESC
-    LIMIT 10
-  `,
-    [diaStr, tipo]
-  );
-  return rows;
-}
-
-// Top 10 por tipo, por SEMANA (7 dias)
-async function getRankingTipoSemana(tipo) {
-  const { rows } = await pool.query(
-    `
-    SELECT "userId",
-           COALESCE(SUM(COALESCE(aplicado,0)),0)::int AS aplicado_total,
-           COALESCE(SUM(COALESCE(carry,0)),0)::int AS extra_total
-    FROM historico
-    WHERE status='APROVADO'
-      AND tipo=$1
-      AND created_at >= NOW() - INTERVAL '7 days'
-    GROUP BY "userId"
-    ORDER BY aplicado_total DESC, extra_total DESC
-    LIMIT 10
-  `,
-    [tipo]
-  );
-  return rows;
-}
-
-function formatRankingUsers(rows) {
-  if (!rows || rows.length === 0) return "Sem dados ainda.";
-  return rows
-    .map((r, i) => `**${i + 1}.** <@${r.userId}> — aplicado **${r.aplicado_total}** | extra **${r.extra_total}**`)
-    .join("\n");
-}
-
-// ==========================
 // 📩 MESSAGE
 // ==========================
 client.on("messageCreate", async (message) => {
@@ -415,7 +365,32 @@ client.on("messageCreate", async (message) => {
     const lower = content.toLowerCase();
 
     // ======================
-    // 🎛 PAINEL
+    // ✅ STATUS (INDIVIDUAL) - QUALQUER UM
+    // ======================
+    if (lower === "!status") {
+      const u = await rollToToday(message.author.id);
+
+      const txt =
+        `👤 ${message.author}\n\n` +
+        `📄 **Papel:** ${u.papelHoje}/100 (extra: ${u.papelCarry})\n` +
+        `🌱 **Sementes:** ${u.sementesHoje}/100 (extra: ${u.sementesCarry})\n\n` +
+        `🕒 Dia: **${u.ultimoDia}**`;
+
+      const embed = new EmbedBuilder()
+        .setColor("#2b2d31")
+        .setTitle("📌 Seu Status")
+        .setDescription(txt)
+        .setFooter({ text: "Comando: !status" })
+        .setTimestamp();
+
+      const thumb = getThumb(client);
+      if (thumb) embed.setThumbnail(thumb);
+
+      return message.reply({ embeds: [embed] });
+    }
+
+    // ======================
+    // 🎛 PAINEL (mantém, se quiser remover depois)
     // ======================
     if (lower === "!painel") {
       const u = await rollToToday(message.author.id);
@@ -446,38 +421,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ======================
-    // 🏆 RANKING GERAL (QUALQUER UM)
-    // ======================
-    if (lower === "!ranking") {
-      const hoje = todayKey();
-
-      const [papelDia, sementesDia, papelSemana, sementesSemana] = await Promise.all([
-        getRankingTipoDia(hoje, "papel"),
-        getRankingTipoDia(hoje, "sementes"),
-        getRankingTipoSemana("papel"),
-        getRankingTipoSemana("sementes"),
-      ]);
-
-      const embed = new EmbedBuilder()
-        .setColor("#2b2d31")
-        .setTitle("🏆 Ranking de Farme (Top 10)")
-        .addFields(
-          { name: `📅 PAPEL — Hoje (${hoje})`, value: formatRankingUsers(papelDia) },
-          { name: `📅 SEMENTES — Hoje (${hoje})`, value: formatRankingUsers(sementesDia) },
-          { name: "🗓️ PAPEL — Últimos 7 dias", value: formatRankingUsers(papelSemana) },
-          { name: "🗓️ SEMENTES — Últimos 7 dias", value: formatRankingUsers(sementesSemana) },
-        )
-        .setFooter({ text: "Comando: !ranking" })
-        .setTimestamp();
-
-      const thumb = getThumb(client);
-      if (thumb) embed.setThumbnail(thumb);
-
-      return message.reply({ embeds: [embed] });
-    }
-
-    // ======================
-    // 📊 RANKING APROVAÇÕES (Gerente/00)
+    // 📊 RANKING APROVAÇÕES (Gerente/00) - mantém
     // ======================
     if (lower === "!rankaprov" || lower === "!rankingaprov" || lower === "!rankingaprovacoes") {
       if (!isGerente && !is00) return message.reply("❌ Apenas **Gerente/00** pode usar.");
@@ -542,7 +486,9 @@ client.on("messageCreate", async (message) => {
     }
 
     // ======================
-    // ✏️ EDITAR (SÓ 00)
+    // ✏️ EDITAR (SÓ 00) + LOGS (ANTES/DEPOIS)
+    // !editar @user papel +50
+    // !editar @user sementes -10
     // ======================
     if (lower.startsWith("!editar")) {
       if (!is00) return message.reply("❌ Apenas cargo **00** pode usar.");
@@ -559,11 +505,16 @@ client.on("messageCreate", async (message) => {
         return message.reply("❌ Você não pode editar o próprio farme.");
       }
 
-      const u = await rollToToday(user.id);
+      const logChannel = getLogChannel(message.guild);
+
+      // pega antes
+      const before = await rollToToday(user.id);
 
       if (tipo === "papel") {
-        const novo = Math.max(0, Number(u.papelHoje || 0) + valor);
-        await pool.query(`UPDATE usuarios SET "papelHoje"=$1 WHERE id=$2`, [novo, user.id]);
+        const antes = Number(before.papelHoje || 0);
+        const depois = Math.max(0, antes + valor);
+
+        await pool.query(`UPDATE usuarios SET "papelHoje"=$1 WHERE id=$2`, [depois, user.id]);
 
         await insertHistorico({
           userId: user.id,
@@ -577,12 +528,35 @@ client.on("messageCreate", async (message) => {
           dia: todayKey(),
         });
 
-        return message.reply(`✅ Papel atualizado: <@${user.id}> **${novo}/100**`);
+        // log
+        if (logChannel) {
+          const embed = new EmbedBuilder()
+            .setColor("#2b2d31")
+            .setTitle("🛠️ AJUSTE MANUAL (00)")
+            .setDescription(
+              `👤 Membro: <@${user.id}>\n` +
+              `🧾 Tipo: **PAPEL**\n` +
+              `✏️ Ajuste: **${valor >= 0 ? "+" : ""}${valor}**\n` +
+              `📌 Antes: **${antes}** → Depois: **${depois}**\n` +
+              `🛡️ Feito por: <@${message.author.id}>\n` +
+              `🕒 ${nowBR()}`
+            )
+            .setTimestamp();
+
+          const thumb = getThumb(client);
+          if (thumb) embed.setThumbnail(thumb);
+
+          logChannel.send({ embeds: [embed] }).catch(() => null);
+        }
+
+        return message.reply(`✅ Papel atualizado: <@${user.id}> **${depois}/100**`);
       }
 
       if (tipo === "sementes") {
-        const novo = Math.max(0, Number(u.sementesHoje || 0) + valor);
-        await pool.query(`UPDATE usuarios SET "sementesHoje"=$1 WHERE id=$2`, [novo, user.id]);
+        const antes = Number(before.sementesHoje || 0);
+        const depois = Math.max(0, antes + valor);
+
+        await pool.query(`UPDATE usuarios SET "sementesHoje"=$1 WHERE id=$2`, [depois, user.id]);
 
         await insertHistorico({
           userId: user.id,
@@ -596,7 +570,28 @@ client.on("messageCreate", async (message) => {
           dia: todayKey(),
         });
 
-        return message.reply(`✅ Sementes atualizado: <@${user.id}> **${novo}/100**`);
+        // log
+        if (logChannel) {
+          const embed = new EmbedBuilder()
+            .setColor("#2b2d31")
+            .setTitle("🛠️ AJUSTE MANUAL (00)")
+            .setDescription(
+              `👤 Membro: <@${user.id}>\n` +
+              `🧾 Tipo: **SEMENTES**\n` +
+              `✏️ Ajuste: **${valor >= 0 ? "+" : ""}${valor}**\n` +
+              `📌 Antes: **${antes}** → Depois: **${depois}**\n` +
+              `🛡️ Feito por: <@${message.author.id}>\n` +
+              `🕒 ${nowBR()}`
+            )
+            .setTimestamp();
+
+          const thumb = getThumb(client);
+          if (thumb) embed.setThumbnail(thumb);
+
+          logChannel.send({ embeds: [embed] }).catch(() => null);
+        }
+
+        return message.reply(`✅ Sementes atualizado: <@${user.id}> **${depois}/100**`);
       }
     }
 
