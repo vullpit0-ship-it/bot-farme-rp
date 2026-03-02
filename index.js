@@ -4,106 +4,87 @@ const {
   ButtonBuilder,
   ButtonStyle,
   ActionRowBuilder,
-  EmbedBuilder,
-  StringSelectMenuBuilder,
   Partials,
 } = require("discord.js");
 
 const express = require("express");
-const sqlite3 = require("sqlite3").verbose();
+const { Pool } = require("pg");
 
 // ==========================
-// 🌐 MINI WEB (Render Web Service precisa PORT)
+// ✅ IDS FIXOS
+// ==========================
+const GERENTE_ROLE_ID = "1477779548484538539";
+const ROLE_00_ID = "1477850489189044365";
+
+const LOG_CHANNEL_ID = "1477800551340310651";
+const ENVIO_FARME_CHANNEL_ID = "1477777883714818098";
+
+// ==========================
+// 🌐 WEB
 // ==========================
 const app = express();
 app.get("/", (req, res) => res.send("Bot online ✅"));
 app.listen(process.env.PORT || 3000, () => console.log("Web OK"));
 
 // ==========================
-// 🗄️ BANCO (SQLite) - INIT GARANTIDO
+// 🗄️ POSTGRES (SUPABASE)
 // ==========================
-const db = new sqlite3.Database("./farmes.db", (err) => {
-  if (err) console.error("Erro ao abrir DB:", err);
+if (!process.env.DATABASE_URL) {
+  console.error("Faltando DATABASE_URL nas env vars (Render).");
+  process.exit(1);
+}
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  // Supabase normalmente precisa SSL em host externo
+  ssl: { rejectUnauthorized: false },
 });
 
-db.on("error", (err) => console.error("DB error:", err));
-
-function initDB() {
-  return new Promise((resolve, reject) => {
-    db.exec(
-      `
-      PRAGMA journal_mode = WAL;
-
-      CREATE TABLE IF NOT EXISTS usuarios (
-        id TEXT PRIMARY KEY,
-        ultimoDia TEXT,
-        entregueHoje INTEGER,
-        divida INTEGER
-      );
-
-      CREATE TABLE IF NOT EXISTS historico (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        userId TEXT,
-        tipo TEXT,
-        quantidade INTEGER,
-        status TEXT,
-        data TEXT,
-        msgId TEXT,
-        gerenteId TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico(msgId);
-      `,
-      (err) => {
-        if (err) {
-          console.error("Erro criando tabelas:", err);
-          return reject(err);
-        }
-        console.log("DB OK (tabelas prontas)");
-        resolve();
-      }
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS usuarios (
+      id TEXT PRIMARY KEY,
+      "ultimoDia" TEXT,
+      "entregueHoje" INTEGER,
+      divida INTEGER
     );
-  });
+
+    CREATE TABLE IF NOT EXISTS historico (
+      id BIGSERIAL PRIMARY KEY,
+      "userId" TEXT,
+      tipo TEXT,
+      quantidade INTEGER,
+      status TEXT,
+      data TEXT,
+      "msgId" TEXT,
+      "gerenteId" TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico ("msgId");
+  `);
+
+  console.log("DB OK (PostgreSQL / Supabase)");
 }
 
 // ==========================
-// 🤖 DISCORD CLIENT
+// 🤖 CLIENT
 // ==========================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages,
   ],
   partials: [Partials.Channel],
 });
 
 client.once("ready", () => {
-  console.log(`Bot online como ${client.user.tag}`);
+  console.log("Bot online como", client.user.tag);
 });
 
 // ==========================
-// 🧠 Helpers
+// 🧠 HELPERS
 // ==========================
-function getRoles(guild, member) {
-  const gerenteRole = guild.roles.cache.find((r) => r.name === "Gerente");
-  const role00 = guild.roles.cache.find((r) => r.name === "00");
-
-  const isGerente = gerenteRole ? member.roles.cache.has(gerenteRole.id) : false;
-  const is00 = role00 ? member.roles.cache.has(role00.id) : false;
-
-  return { isGerente, is00 };
-}
-
-async function safeDM(user, content) {
-  try {
-    await user.send(content);
-  } catch {
-    // DM fechada
-  }
-}
-
 function nowBR() {
   return new Date().toLocaleString("pt-BR");
 }
@@ -112,371 +93,273 @@ function todayKey() {
   return new Date().toDateString();
 }
 
-// (Opcional) Defina um ID do canal de log no Render:
-// LOG_CHANNEL_ID=1234567890
 function getLogChannel(guild) {
-  const byId = process.env.LOG_CHANNEL_ID
-    ? guild.channels.cache.get(process.env.LOG_CHANNEL_ID)
-    : null;
-
-  if (byId) return byId;
-
-  return guild.channels.cache.find((c) => c.name === "logs-farme") || null;
+  return guild.channels.cache.get(LOG_CHANNEL_ID) || null;
 }
 
-// =================================================
+function isEnvioChannel(message) {
+  return (
+    message.channel.id === ENVIO_FARME_CHANNEL_ID ||
+    message.channel.parentId === ENVIO_FARME_CHANNEL_ID
+  );
+}
+
+// ✅ garante usuário (sem quebrar com concorrência)
+async function ensureUser(userId) {
+  // tenta buscar
+  let res = await pool.query(`SELECT * FROM usuarios WHERE id = $1`, [userId]);
+  if (res.rows[0]) return res.rows[0];
+
+  // tenta inserir (se outro processo inserir ao mesmo tempo, não quebra)
+  const hoje = todayKey();
+  await pool.query(
+    `INSERT INTO usuarios (id, "ultimoDia", "entregueHoje", divida)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (id) DO NOTHING`,
+    [userId, hoje, 0, 0]
+  );
+
+  // busca de novo e retorna
+  res = await pool.query(`SELECT * FROM usuarios WHERE id = $1`, [userId]);
+  return res.rows[0];
+}
+
+async function setEntregueHoje(userId, novoValor) {
+  await pool.query(`UPDATE usuarios SET "entregueHoje" = $1 WHERE id = $2`, [
+    novoValor,
+    userId,
+  ]);
+}
+
+async function insertHistorico({ userId, tipo, quantidade, status, msgId, gerenteId }) {
+  await pool.query(
+    `INSERT INTO historico ("userId", tipo, quantidade, status, data, "msgId", "gerenteId")
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [userId, tipo, quantidade, status, nowBR(), msgId, gerenteId]
+  );
+}
+
+// evita clicar duas vezes no mesmo farme
+async function alreadyProcessed(msgId) {
+  const { rows } = await pool.query(
+    `SELECT id FROM historico
+     WHERE "msgId" = $1 AND (status = 'APROVADO' OR status = 'NEGADO')
+     LIMIT 1`,
+    [msgId]
+  );
+  return !!rows[0];
+}
+
+// ==========================
 // 📩 MESSAGE
-// =================================================
+// ==========================
 client.on("messageCreate", async (message) => {
-  if (message.author.bot) return;
-  if (!message.guild) return;
+  try {
+    if (!message.guild || message.author.bot) return;
 
-  const { isGerente, is00 } = getRoles(message.guild, message.member);
+    const member = await message.guild.members.fetch(message.author.id);
+    const isGerente = member.roles.cache.has(GERENTE_ROLE_ID);
+    const is00 = member.roles.cache.has(ROLE_00_ID);
 
-  // ==========================
-  // 🎛 PAINEL
-  // ==========================
-  if (message.content === "!painel") {
-    const embed = new EmbedBuilder()
-      .setColor("#2b2d31")
-      .setAuthor({
-        name: "Central de Controle",
-        iconURL: message.guild.iconURL(),
-      })
-      .setDescription("Selecione uma opção no menu abaixo.")
-      .setFooter({ text: `Solicitado por ${message.author.username}` })
-      .setTimestamp();
+    // ======================
+    // 🔥 FARME
+    // ======================
+    if (message.content.startsWith("!farme")) {
+      if (!isEnvioChannel(message)) return;
 
-    const menu = new StringSelectMenuBuilder()
-      .setCustomId("painel_menu")
-      .setPlaceholder("Abrir menu...");
+      const args = message.content.split(" ");
+      const tipo = args[1]?.toLowerCase();
+      const quantidade = parseInt(args[2], 10);
 
-    const options = [
-      { label: "Meu Saldo", value: "meu_saldo", emoji: "👤" },
-      { label: "Meu Histórico", value: "meu_historico", emoji: "🧾" },
-    ];
-
-    if (isGerente || is00) {
-      options.push({ label: "Devedores", value: "ver_devedores", emoji: "📋" });
-    }
-    if (is00) {
-      options.push({ label: "Alterar Saldo", value: "alterar_saldo", emoji: "⚙️" });
-    }
-
-    menu.addOptions(options);
-
-    const row = new ActionRowBuilder().addComponents(menu);
-    return message.reply({ embeds: [embed], components: [row] });
-  }
-
-  // ==========================
-  // ✏️ EDITAR (só 00)
-  // ==========================
-  if (message.content.startsWith("!editar")) {
-    const role00 = message.guild.roles.cache.find((r) => r.name === "00");
-    const is00local = role00 ? message.member.roles.cache.has(role00.id) : false;
-    if (!is00local) return message.reply("❌ Apenas cargo **00** pode usar.");
-
-    const user = message.mentions.users.first();
-    const valor = parseInt(message.content.split(" ")[2], 10);
-
-    if (!user || isNaN(valor)) {
-      return message.reply("Use: `!editar @usuario +50` ou `!editar @usuario -50`");
-    }
-
-    const hojeDia = todayKey();
-
-    db.get(`SELECT * FROM usuarios WHERE id = ?`, [user.id], (err, row) => {
-      if (err) return message.reply("Erro no banco.");
-      if (!row) return message.reply("Usuário sem registro ainda.");
-
-      let entregueHoje = row.entregueHoje;
-      let divida = row.divida;
-      let ultimoDia = row.ultimoDia;
-
-      if (ultimoDia !== hojeDia) {
-        const falta = 100 - entregueHoje;
-        if (falta > 0) divida += falta;
-        entregueHoje = 0;
-        ultimoDia = hojeDia;
+      if (!["sementes", "papel"].includes(tipo)) {
+        return message.reply("❌ Tipo inválido. Use `sementes` ou `papel`.");
       }
 
-      const novoSaldo = Math.max(0, entregueHoje + valor);
+      if (isNaN(quantidade) || quantidade <= 0) {
+        return message.reply("❌ Quantidade inválida. Ex: `!farme papel 10`");
+      }
 
-      db.run(
-        `UPDATE usuarios SET ultimoDia = ?, entregueHoje = ?, divida = ? WHERE id = ?`,
-        [ultimoDia, novoSaldo, divida, user.id]
+      if (!message.attachments.size) {
+        return message.reply("❌ Envie o print junto.");
+      }
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`aprovar_${message.author.id}_${quantidade}_${tipo}`)
+          .setLabel("Aprovar")
+          .setStyle(ButtonStyle.Success),
+
+        new ButtonBuilder()
+          .setCustomId(`negar_${message.author.id}_${quantidade}_${tipo}`)
+          .setLabel("Negar")
+          .setStyle(ButtonStyle.Danger)
       );
 
-      db.run(
-        `INSERT INTO historico (userId, tipo, quantidade, status, data, msgId, gerenteId)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [user.id, "ajuste", valor, "AJUSTE", nowBR(), "manual", message.author.id]
-      );
+      return message.reply({
+        content: `📥 Farme enviado por ${message.author}\n📦 ${tipo.toUpperCase()} • ${quantidade}\n⏳ Aguardando gerente...`,
+        components: [row],
+      });
+    }
 
-      return message.reply(
-        `✅ Ajuste feito em <@${user.id}>.\n📊 Entregue hoje: **${novoSaldo}/100** | 💰 Dívida: **${divida}**`
-      );
-    });
+    // ======================
+    // ✏️ EDITAR (SO 00)
+    // ======================
+    if (message.content.startsWith("!editar")) {
+      if (!is00) return message.reply("❌ Apenas cargo **00** pode usar.");
 
-    return;
+      const user = message.mentions.users.first();
+      const valor = parseInt(message.content.split(" ")[2], 10);
+
+      if (!user || isNaN(valor)) {
+        return message.reply("Use: `!editar @usuario +50` ou `!editar @usuario -50`");
+      }
+
+      if (user.id === message.author.id) {
+        return message.reply("❌ Você não pode editar o próprio farme.");
+      }
+
+      const u = await ensureUser(user.id);
+
+      let novo = (u.entregueHoje || 0) + valor;
+      if (novo < 0) novo = 0;
+
+      await setEntregueHoje(user.id, novo);
+
+      await insertHistorico({
+        userId: user.id,
+        tipo: "ajuste",
+        quantidade: valor,
+        status: "AJUSTE",
+        msgId: "manual",
+        gerenteId: message.author.id,
+      });
+
+      return message.reply(`✅ Atualizado: <@${user.id}> agora está com **${novo}/100**`);
+    }
+
+    // (opcional) se quiser, você pode bloquear comandos para gerente etc. aqui
+    void isGerente; // evita warning caso não use
+  } catch (e) {
+    console.error("Erro messageCreate:", e);
+    try {
+      await message.reply("❌ Erro interno.");
+    } catch {}
   }
-
-  // ==========================
-  // 🔥 FARME
-  // ==========================
-  if (message.channel.name !== "envio-farme") return;
-  if (!message.content.startsWith("!farme")) return;
-
-  const args = message.content.split(" ");
-  if (args.length < 3) return message.reply("Use: `!farme [sementes/papel] [quantidade]`");
-
-  const tipo = (args[1] || "").toLowerCase();
-  const quantidade = parseInt(args[2], 10);
-
-  if (!["sementes", "papel"].includes(tipo)) return message.reply("❌ Tipo inválido.");
-  if (isNaN(quantidade) || quantidade <= 0) return message.reply("❌ Quantidade inválida.");
-  if (message.attachments.size === 0) return message.reply("❌ Envie o print junto com o comando.");
-
-  const approveButton = new ButtonBuilder()
-    .setCustomId(`aprovar_${message.author.id}_${quantidade}_${tipo}`)
-    .setLabel("Aprovar")
-    .setStyle(ButtonStyle.Success);
-
-  const denyButton = new ButtonBuilder()
-    .setCustomId(`negar_${message.author.id}_${quantidade}_${tipo}`)
-    .setLabel("Negar")
-    .setStyle(ButtonStyle.Danger);
-
-  const row = new ActionRowBuilder().addComponents(approveButton, denyButton);
-
-  return message.reply({
-    content: `📥 Farme enviado por ${message.author}\n📦 ${tipo.toUpperCase()} • ${quantidade}\n⏳ Aguardando gerente...`,
-    components: [row],
-  });
 });
 
-// =================================================
-// 🔘 INTERAÇÕES
-// =================================================
+// ==========================
+// 🔘 BUTTONS
+// ==========================
 client.on("interactionCreate", async (interaction) => {
-  if (!interaction.guild) return;
+  try {
+    if (!interaction.isButton() || !interaction.guild) return;
 
-  const { isGerente, is00 } = getRoles(interaction.guild, interaction.member);
-  const logChannel = getLogChannel(interaction.guild);
+    const member = await interaction.guild.members.fetch(interaction.user.id);
+    const isGerente = member.roles.cache.has(GERENTE_ROLE_ID);
+    const is00 = member.roles.cache.has(ROLE_00_ID);
 
-  // ==========================
-  // 🎛 MENU PAINEL
-  // ==========================
-  if (interaction.isStringSelectMenu() && interaction.customId === "painel_menu") {
-    const escolha = interaction.values[0];
-
-    if (escolha === "meu_saldo") {
-      const hoje = todayKey();
-
-      db.get(`SELECT * FROM usuarios WHERE id = ?`, [interaction.user.id], (err, row) => {
-        if (!row) return interaction.reply({ content: "📊 Você ainda não tem registro.", ephemeral: true });
-
-        let entregueHoje = row.entregueHoje;
-        const divida = row.divida;
-
-        if (row.ultimoDia !== hoje) entregueHoje = 0;
-
-        const txt =
-          `👤 **Seu status**\n\n` +
-          `📦 Entregue hoje: **${entregueHoje}/100**\n` +
-          `💰 Dívida: **${divida}**`;
-
-        return interaction.reply({ content: txt, ephemeral: true });
-      });
-
-      return;
+    if (!isGerente && !is00) {
+      return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
     }
 
-    if (escolha === "meu_historico") {
-      db.all(
-        `SELECT * FROM historico WHERE userId = ? ORDER BY id DESC LIMIT 8`,
-        [interaction.user.id],
-        (err, rows) => {
-          if (!rows || rows.length === 0) {
-            return interaction.reply({ content: "🧾 Sem histórico ainda.", ephemeral: true });
-          }
+    const logChannel = getLogChannel(interaction.guild);
 
-          const txt = rows
-            .map((r) => `• **${r.status}** | ${String(r.tipo).toUpperCase()} | ${r.quantidade} | ${r.data}`)
-            .join("\n");
+    const [acao, userId, quantidadeStr, tipo] = interaction.customId.split("_");
+    const quantidade = parseInt(quantidadeStr, 10);
+    const msgId = interaction.message.id;
 
-          return interaction.reply({ content: `🧾 **Últimos registros:**\n\n${txt}`, ephemeral: true });
-        }
-      );
+    await interaction.deferUpdate();
 
-      return;
-    }
-
-    if (escolha === "ver_devedores") {
-      if (!isGerente && !is00) return interaction.reply({ content: "Sem permissão.", ephemeral: true });
-
-      db.all(`SELECT * FROM usuarios WHERE divida > 0 ORDER BY divida DESC`, [], (err, rows) => {
-        if (!rows || rows.length === 0) return interaction.reply({ content: "✅ Ninguém está devendo.", ephemeral: true });
-
-        const lista = rows.map((u) => `• <@${u.id}> — 💰 **${u.divida}**`).join("\n");
-        return interaction.reply({ content: `📋 **Devedores:**\n\n${lista}`, ephemeral: true });
-      });
-
-      return;
-    }
-
-    if (escolha === "alterar_saldo") {
-      if (!is00) return interaction.reply({ content: "Apenas cargo 00.", ephemeral: true });
-
-      return interaction.reply({
-        content:
-          "⚙️ **Alterar saldo (somente 00)**\n\n" +
-          "Use:\n" +
-          "`!editar @usuario +50`\n" +
-          "`!editar @usuario -50`\n",
+    if (await alreadyProcessed(msgId)) {
+      return interaction.followUp({
+        content: "⚠️ Esse farme já foi processado.",
         ephemeral: true,
       });
     }
 
-    return;
-  }
+    const u = await ensureUser(userId);
 
-  // ==========================
-  // 🔥 BOTÕES APROVAR / NEGAR
-  // ==========================
-  if (!interaction.isButton()) return;
+    if (acao === "aprovar") {
+      const novo = (u.entregueHoje || 0) + quantidade;
 
-  if (!isGerente && !is00) {
-    return interaction.reply({ content: "❌ Apenas Gerentes/00 podem usar.", ephemeral: true });
-  }
+      await setEntregueHoje(userId, novo);
 
-  const msgId = interaction.message.id;
+      await insertHistorico({
+        userId,
+        tipo,
+        quantidade,
+        status: "APROVADO",
+        msgId,
+        gerenteId: interaction.user.id,
+      });
 
-  await interaction.deferUpdate();
+      await interaction.message.edit({
+        content: `✅ Farme aprovado! (novo: ${novo}/100)`,
+        components: [],
+      });
 
-  // ✅ Anti-dupla persistente no DB
-  db.get(
-    `SELECT id FROM historico WHERE msgId = ? AND (status = 'APROVADO' OR status = 'NEGADO') LIMIT 1`,
-    [msgId],
-    async (err, already) => {
-      if (already) {
-        return interaction.followUp({ content: "⚠️ Esse farme já foi processado.", ephemeral: true });
+      if (logChannel) {
+        logChannel
+          .send(
+            `✅ APROVADO: <@${userId}> +${quantidade} (${tipo}) | Novo: ${novo}/100 | Por: <@${interaction.user.id}>`
+          )
+          .catch(() => null);
       }
-
-      const [acao, userId, quantidadeStr, tipo] = interaction.customId.split("_");
-      const quantidade = parseInt(quantidadeStr, 10);
-
-      if (!["aprovar", "negar"].includes(acao)) return;
-
-      const dataAgora = nowBR();
-      const hojeDia = todayKey();
-
-      // ✅ APROVAR
-      if (acao === "aprovar") {
-        db.get(`SELECT * FROM usuarios WHERE id = ?`, [userId], async (err2, row) => {
-          if (!row) {
-            db.run(`INSERT INTO usuarios VALUES (?, ?, ?, ?)`, [userId, hojeDia, 0, 0]);
-            row = { ultimoDia: hojeDia, entregueHoje: 0, divida: 0 };
-          }
-
-          let entregueHoje = row.entregueHoje;
-          let divida = row.divida;
-          let ultimoDia = row.ultimoDia;
-
-          if (ultimoDia !== hojeDia) {
-            const falta = 100 - entregueHoje;
-            if (falta > 0) divida += falta;
-            entregueHoje = 0;
-            ultimoDia = hojeDia;
-          }
-
-          entregueHoje += quantidade;
-
-          db.run(
-            `UPDATE usuarios SET ultimoDia = ?, entregueHoje = ?, divida = ? WHERE id = ?`,
-            [ultimoDia, entregueHoje, divida, userId]
-          );
-
-          db.run(
-            `INSERT INTO historico (userId, tipo, quantidade, status, data, msgId, gerenteId)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [userId, tipo, quantidade, "APROVADO", dataAgora, msgId, interaction.user.id]
-          );
-
-          await interaction.message.edit({ content: "✅ Farme aprovado!", components: [] });
-
-          const user = await client.users.fetch(userId).catch(() => null);
-          if (user) await safeDM(user, `✅ Seu farme de **${quantidade} ${tipo}** foi **APROVADO**!`);
-
-          if (logChannel) {
-            const embed = new EmbedBuilder()
-              .setTitle("✅ FARME APROVADO")
-              .setColor("Green")
-              .addFields(
-                { name: "👤 Membro", value: `<@${userId}>`, inline: true },
-                { name: "👮 Gerente", value: `<@${interaction.user.id}>`, inline: true },
-                { name: "📦 Tipo", value: tipo.toUpperCase(), inline: true },
-                { name: "🔢 Quantidade", value: `${quantidade}`, inline: true },
-                { name: "📊 Entregue Hoje", value: `${entregueHoje}/100`, inline: true },
-                { name: "💰 Dívida", value: `${divida}`, inline: true }
-              )
-              .setFooter({ text: `ID: ${msgId}` })
-              .setTimestamp();
-
-            logChannel.send({ embeds: [embed] }).catch(() => null);
-          }
-        });
-
-        return;
-      }
-
-      // ❌ NEGAR
-      if (acao === "negar") {
-        db.run(
-          `INSERT INTO historico (userId, tipo, quantidade, status, data, msgId, gerenteId)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [userId, tipo, quantidade, "NEGADO", dataAgora, msgId, interaction.user.id]
-        );
-
-        await interaction.message.edit({ content: "❌ Farme negado!", components: [] });
-
-        const user = await client.users.fetch(userId).catch(() => null);
-        if (user) await safeDM(user, `❌ Seu farme de **${quantidade} ${tipo}** foi **NEGADO**.`);
-
-        if (logChannel) {
-          const embed = new EmbedBuilder()
-            .setTitle("❌ FARME NEGADO")
-            .setColor("Red")
-            .addFields(
-              { name: "👤 Membro", value: `<@${userId}>`, inline: true },
-              { name: "👮 Gerente", value: `<@${interaction.user.id}>`, inline: true },
-              { name: "📦 Tipo", value: tipo.toUpperCase(), inline: true },
-              { name: "🔢 Quantidade", value: `${quantidade}`, inline: true }
-            )
-            .setFooter({ text: `ID: ${msgId}` })
-            .setTimestamp();
-
-          logChannel.send({ embeds: [embed] }).catch(() => null);
-        }
-
-        return;
-      }
+      return;
     }
-  );
+
+    if (acao === "negar") {
+      await insertHistorico({
+        userId,
+        tipo,
+        quantidade,
+        status: "NEGADO",
+        msgId,
+        gerenteId: interaction.user.id,
+      });
+
+      await interaction.message.edit({
+        content: "❌ Farme negado!",
+        components: [],
+      });
+
+      if (logChannel) {
+        logChannel
+          .send(
+            `❌ NEGADO: <@${userId}> ${quantidade} (${tipo}) | Por: <@${interaction.user.id}>`
+          )
+          .catch(() => null);
+      }
+      return;
+    }
+
+    // se vier algo inesperado:
+    return interaction.followUp({ content: "⚠️ Ação inválida.", ephemeral: true });
+  } catch (e) {
+    console.error("Erro interactionCreate:", e);
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ content: "❌ Erro interno.", ephemeral: true });
+      } else {
+        await interaction.reply({ content: "❌ Erro interno.", ephemeral: true });
+      }
+    } catch {}
+  }
 });
 
 // ==========================
-// 🔐 START (somente depois do DB OK)
+// START
 // ==========================
 (async () => {
   try {
     await initDB();
+
     if (!process.env.DISCORD_TOKEN) {
-      console.error("Faltando DISCORD_TOKEN nas env vars do Render!");
+      console.error("Faltando DISCORD_TOKEN nas env vars (Render).");
       process.exit(1);
     }
-    client.login(process.env.DISCORD_TOKEN);
+
+    await client.login(process.env.DISCORD_TOKEN);
   } catch (e) {
     console.error("Falha ao iniciar:", e);
     process.exit(1);
