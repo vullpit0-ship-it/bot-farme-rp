@@ -58,7 +58,11 @@ function tomorrowKey() {
   return d.toDateString();
 }
 
+// ==========================
+// 🧱 INIT DB (COM MIGRAÇÃO)
+// ==========================
 async function initDB() {
+  // 1) Cria tabelas (se não existirem)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS usuarios (
       id TEXT PRIMARY KEY,
@@ -82,17 +86,29 @@ async function initDB() {
       aplicado INTEGER,
       carry INTEGER
     );
-
-    CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico ("msgId");
-    CREATE INDEX IF NOT EXISTS idx_historico_dia ON historico (dia);
   `);
 
+  // 2) Migrações seguras (caso já exista tabela antiga sem colunas)
+  // usuarios
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "papelHoje" INTEGER;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "sementesHoje" INTEGER;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "papelCarry" INTEGER;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "sementesCarry" INTEGER;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "ultimoDia" TEXT;`);
 
+  // historico
+  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS "userId" TEXT;`);
+  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS tipo TEXT;`);
+  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS quantidade INTEGER;`);
+  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS status TEXT;`);
+  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS data TEXT;`);
+  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS dia TEXT;`);
+  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS "msgId" TEXT;`);
+  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS "gerenteId" TEXT;`);
+  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS aplicado INTEGER;`);
+  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS carry INTEGER;`);
+
+  // 3) Defaults (evita nulls)
   await pool.query(
     `
     UPDATE usuarios
@@ -105,6 +121,19 @@ async function initDB() {
   `,
     [todayKey()]
   );
+
+  // 4) Índices (com aspas + try/catch pra não derrubar o bot)
+  try {
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico ("msgId");`);
+  } catch (e) {
+    console.error("Aviso: falha ao criar idx_historico_msgId:", e?.message || e);
+  }
+
+  try {
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_dia ON historico ("dia");`);
+  } catch (e) {
+    console.error("Aviso: falha ao criar idx_historico_dia:", e?.message || e);
+  }
 
   console.log("DB OK (PostgreSQL / Supabase)");
 }
@@ -156,6 +185,7 @@ async function ensureUser(userId) {
   return res.rows[0];
 }
 
+// quando vira o dia: começa o dia com o carry (excesso de ontem)
 async function rollToToday(userId) {
   const hoje = todayKey();
   const u = await ensureUser(userId);
@@ -165,6 +195,7 @@ async function rollToToday(userId) {
   const papelCarry = Number(u.papelCarry || 0);
   const sementesCarry = Number(u.sementesCarry || 0);
 
+  // entra no novo dia já contando carry (até 100), resto continua em carry para próximos dias
   const papelHoje = Math.min(100, papelCarry);
   const sementesHoje = Math.min(100, sementesCarry);
 
@@ -186,32 +217,11 @@ async function rollToToday(userId) {
   return res.rows[0];
 }
 
-async function insertHistorico({
-  userId,
-  tipo,
-  quantidade,
-  status,
-  msgId,
-  gerenteId,
-  aplicado,
-  carry,
-  dia,
-}) {
+async function insertHistorico({ userId, tipo, quantidade, status, msgId, gerenteId, aplicado, carry, dia }) {
   await pool.query(
     `INSERT INTO historico ("userId", tipo, quantidade, status, data, dia, "msgId", "gerenteId", aplicado, carry)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-    [
-      userId,
-      tipo,
-      quantidade,
-      status,
-      nowBR(),
-      dia || todayKey(),
-      msgId,
-      gerenteId,
-      aplicado ?? null,
-      carry ?? null,
-    ]
+    [userId, tipo, quantidade, status, nowBR(), dia || todayKey(), msgId, gerenteId, aplicado ?? null, carry ?? null]
   );
 }
 
@@ -223,7 +233,9 @@ async function alreadyProcessed(msgId) {
   return !!rows[0];
 }
 
+// aplica aprovação respeitando limite 100/dia por tipo e joga excesso para carry
 async function applyFarm(userId, tipo, quantidade) {
+  // garante rollover do dia
   const u0 = await rollToToday(userId);
 
   let papelHoje = Number(u0.papelHoje || 0);
@@ -255,10 +267,11 @@ async function applyFarm(userId, tipo, quantidade) {
     sementesHoje += aplicado;
     sementesCarry += carry;
 
-    await pool.query(
-      `UPDATE usuarios SET "sementesHoje"=$1, "sementesCarry"=$2 WHERE id=$3`,
-      [sementesHoje, sementesCarry, userId]
-    );
+    await pool.query(`UPDATE usuarios SET "sementesHoje"=$1, "sementesCarry"=$2 WHERE id=$3`, [
+      sementesHoje,
+      sementesCarry,
+      userId,
+    ]);
   } else {
     throw new Error("tipo inválido");
   }
@@ -274,7 +287,7 @@ client.on("messageCreate", async (message) => {
   try {
     if (!message.guild || message.author.bot) return;
 
-    // ✅ LOG IMPORTANTE (pra confirmar que chega no bot)
+    // ✅ LOG IMPORTANTE
     console.log("[MSG]", message.channel.id, message.author.tag, JSON.stringify(message.content));
 
     const member = await message.guild.members.fetch(message.author.id);
@@ -285,7 +298,7 @@ client.on("messageCreate", async (message) => {
     const lower = content.toLowerCase();
 
     // ======================
-    // 🎛 PAINEL (robusto)
+    // 🎛 PAINEL
     // ======================
     if (lower === "!painel") {
       const u = await rollToToday(message.author.id);
@@ -302,9 +315,7 @@ client.on("messageCreate", async (message) => {
           .setColor("#2b2d31")
           .setTitle("📌 Painel do Farme")
           .setDescription(txt)
-          .setFooter({
-            text: is00 ? "Você é 00 (tem !editar)" : isGerente ? "Você é Gerente" : "Membro",
-          })
+          .setFooter({ text: is00 ? "Você é 00 (tem !editar)" : isGerente ? "Você é Gerente" : "Membro" })
           .setTimestamp();
 
         return message.reply({ embeds: [embed] });
@@ -368,7 +379,6 @@ client.on("messageCreate", async (message) => {
       if (!user || !["papel", "sementes"].includes(tipo) || isNaN(valor)) {
         return message.reply("Use: `!editar @usuario papel +50` ou `!editar @usuario sementes -10`");
       }
-
       if (user.id === message.author.id) {
         return message.reply("❌ Você não pode editar o próprio farme.");
       }
@@ -376,7 +386,7 @@ client.on("messageCreate", async (message) => {
       const u = await rollToToday(user.id);
 
       if (tipo === "papel") {
-        let novo = Math.max(0, Number(u.papelHoje || 0) + valor);
+        const novo = Math.max(0, Number(u.papelHoje || 0) + valor);
         await pool.query(`UPDATE usuarios SET "papelHoje"=$1 WHERE id=$2`, [novo, user.id]);
 
         await insertHistorico({
@@ -395,7 +405,7 @@ client.on("messageCreate", async (message) => {
       }
 
       if (tipo === "sementes") {
-        let novo = Math.max(0, Number(u.sementesHoje || 0) + valor);
+        const novo = Math.max(0, Number(u.sementesHoje || 0) + valor);
         await pool.query(`UPDATE usuarios SET "sementesHoje"=$1 WHERE id=$2`, [novo, user.id]);
 
         await insertHistorico({
@@ -417,9 +427,7 @@ client.on("messageCreate", async (message) => {
     void isGerente;
   } catch (e) {
     console.error("Erro messageCreate:", e);
-    try {
-      await message.reply("❌ Erro interno.");
-    } catch {}
+    try { await message.reply("❌ Erro interno."); } catch {}
   }
 });
 
@@ -480,11 +488,9 @@ client.on("interactionCreate", async (interaction) => {
         components: [],
       });
 
-      logChannel
-        ?.send(
-          `✅ APROVADO: <@${userId}> +${quantidade} (${tipo}) | aplicado ${result.aplicado} / carry ${result.carry} | Por: <@${interaction.user.id}>`
-        )
-        .catch(() => null);
+      logChannel?.send(
+        `✅ APROVADO: <@${userId}> +${quantidade} (${tipo}) | aplicado ${result.aplicado} / carry ${result.carry} | Por: <@${interaction.user.id}>`
+      ).catch(() => null);
 
       return;
     }
@@ -507,9 +513,9 @@ client.on("interactionCreate", async (interaction) => {
         components: [],
       });
 
-      logChannel
-        ?.send(`❌ NEGADO: <@${userId}> ${quantidade} (${tipo}) | Por: <@${interaction.user.id}>`)
-        .catch(() => null);
+      logChannel?.send(
+        `❌ NEGADO: <@${userId}> ${quantidade} (${tipo}) | Por: <@${interaction.user.id}>`
+      ).catch(() => null);
 
       return;
     }
@@ -539,5 +545,3 @@ client.on("interactionCreate", async (interaction) => {
     process.exit(1);
   }
 })();
-// build-force 2026-03-02T03:19:02.4759051-03:00
-
