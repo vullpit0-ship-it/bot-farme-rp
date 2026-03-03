@@ -8,15 +8,14 @@ const {
   Partials,
 } = require("discord.js");
 
-console.log("🔥 BUILD V999 (DEBUG OK) 🔥", new Date().toISOString());
+console.log("🔥 BUILD (DEBUG BUTTONS) 🔥", new Date().toISOString());
 
 const express = require("express");
 const { Pool } = require("pg");
 
 // ==========================
-// ✅ CONFIG POR SERVIDOR
+// ✅ CONFIG POR SERVIDOR (2 servidores)
 // ==========================
-// ATENÇÃO: as CHAVES do CONFIGS precisam ser GUILD ID (ID do servidor), NÃO canal/categoria.
 const GUILD_ID_TESTE = "1477774289414656213";
 const GUILD_ID_NOVA_ORDEM = "1469111028796227728";
 
@@ -27,9 +26,6 @@ const CONFIGS = {
     ROLE_00_ID: "1477850489189044365",
     LOG_CHANNEL_ID: "1477800551340310651",
     ENVIO_FARME_CHANNEL_ID: "1477777883714818098",
-
-    // opcional (se quiser permitir por categoria)
-    // ENVIO_FARME_CATEGORY_ID: "ID_DA_CATEGORIA_AQUI",
   },
 
   [GUILD_ID_NOVA_ORDEM]: {
@@ -38,10 +34,6 @@ const CONFIGS = {
     ROLE_00_ID: "1469111029161136392",
     LOG_CHANNEL_ID: "1478096038114885704",
     ENVIO_FARME_CHANNEL_ID: "1478095912789082284",
-
-    // opcional: se o #farme-diario está dentro da categoria BAU MEMBRO,
-    // você pode colocar o ID da categoria aqui (parentId).
-    // ENVIO_FARME_CATEGORY_ID: "1469111031161819289",
   },
 };
 
@@ -49,13 +41,8 @@ function getCfg(guildId) {
   return CONFIGS[guildId] || null;
 }
 
-// ✅ Opcional: logo custom pro log (Render -> Environment -> LOGO_URL)
 const LOGO_URL = process.env.LOGO_URL || null;
-
-// ✅ Meta diária obrigatória
 const META_DIARIA = 100;
-
-// ✅ Horário do “fechamento do dia”
 const DAILY_AUDIT_HOUR = 0;
 const DAILY_AUDIT_MIN = 5;
 
@@ -95,7 +82,6 @@ function yesterdayKey() {
   return d.toDateString();
 }
 
-// thumbnail do embed (logo custom OU avatar do bot)
 function getThumb(interactionOrClient) {
   const avatar =
     interactionOrClient?.user?.displayAvatarURL?.() ||
@@ -105,7 +91,7 @@ function getThumb(interactionOrClient) {
 }
 
 // ==========================
-// 🧱 INIT DB (COM MIGRAÇÃO) - POR SERVIDOR (guildId)
+// 🧱 INIT DB (COM MIGRAÇÃO)
 // ==========================
 async function initDB() {
   await pool.query(`
@@ -144,7 +130,6 @@ async function initDB() {
     );
   `);
 
-  // migrações seguras
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "guildId" TEXT;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "userId" TEXT;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "ultimoDia" TEXT;`);
@@ -169,7 +154,6 @@ async function initDB() {
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
   await pool.query(`UPDATE historico SET created_at = NOW() WHERE created_at IS NULL;`);
 
-  // defaults
   await pool.query(
     `
     UPDATE usuarios
@@ -185,11 +169,18 @@ async function initDB() {
     [todayKey()]
   );
 
-  // índices
-  try { await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico ("msgId");`); } catch {}
-  try { await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_dia ON historico ("dia");`); } catch {}
-  try { await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_created_at ON historico (created_at);`); } catch {}
-  try { await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_guild_user_dia ON historico ("guildId","userId","dia");`); } catch {}
+  try {
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico ("msgId");`);
+  } catch {}
+  try {
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_dia ON historico ("dia");`);
+  } catch {}
+  try {
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_created_at ON historico (created_at);`);
+  } catch {}
+  try {
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_guild_user_dia ON historico ("guildId","userId","dia");`);
+  } catch {}
 
   console.log("DB OK (PostgreSQL / Supabase)");
 }
@@ -197,18 +188,18 @@ async function initDB() {
 // ==========================
 // 🤖 CLIENT
 // ==========================
+// ✅ AQUI você ativa GuildMembers
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,     // ✅ ADICIONADO
+    GatewayIntentBits.GuildMembers, // ✅ importante p/ roles/cache e evita dor de cabeça
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
-  partials: [Partials.Channel],
+  partials: [Partials.Channel, Partials.Message, Partials.GuildMember],
 });
 
-// mantém compatibilidade (algumas versões usam "ready")
-client.once("ready", () => {
+client.once("clientReady", () => {
   console.log("Bot online como", client.user?.tag);
   startDailyAuditLoop().catch((e) => console.error("Erro startDailyAuditLoop:", e));
 });
@@ -225,19 +216,7 @@ function getLogChannel(guild) {
 function isEnvioChannel(message) {
   const cfg = getCfg(message.guild.id);
   if (!cfg) return false;
-
-  const chId = message.channel.id;
-  const parentId = message.channel.parentId || null;
-
-  if (chId === cfg.ENVIO_FARME_CHANNEL_ID) return true;
-
-  // ✅ opcional: permitir categoria também
-  if (cfg.ENVIO_FARME_CATEGORY_ID && parentId === cfg.ENVIO_FARME_CATEGORY_ID) return true;
-
-  // (mantive seu comportamento antigo: se você colocar categoria no ENVIO_FARME_CHANNEL_ID)
-  if (parentId === cfg.ENVIO_FARME_CHANNEL_ID) return true;
-
-  return false;
+  return message.channel.id === cfg.ENVIO_FARME_CHANNEL_ID;
 }
 
 async function ensureUser(guildId, userId) {
@@ -465,7 +444,13 @@ async function runDailyAuditOnce() {
           [faltouP, faltouS, guild.id, userId]
         );
 
-        faltaram.push({ userId, papel_total: totals.papel, sementes_total: totals.sementes, faltouP, faltouS });
+        faltaram.push({
+          userId,
+          papel_total: totals.papel,
+          sementes_total: totals.sementes,
+          faltouP,
+          faltouS,
+        });
       }
     }
 
@@ -498,7 +483,9 @@ async function runDailyAuditOnce() {
           .setDescription(
             `📅 Dia auditado: **${diaAuditado}**\n🎯 Meta diária: **${META_DIARIA}**\n📌 A diferença foi somada no **Farme atrasado**.\n\n${chunks[i]}`
           )
-          .setFooter({ text: i === 0 ? "Meta obrigatória: abaixo da meta vira dívida acumulada." : `Continuação (${i + 1}/${chunks.length})` })
+          .setFooter({
+            text: i === 0 ? "Meta obrigatória: abaixo da meta vira dívida acumulada." : `Continuação (${i + 1}/${chunks.length})`,
+          })
           .setTimestamp();
         if (thumb) embed.setThumbnail(thumb);
         await logChannel.send({ embeds: [embed] }).catch(() => null);
@@ -525,55 +512,15 @@ client.on("messageCreate", async (message) => {
     const cfg = getCfg(message.guild.id);
     if (!cfg) return;
 
-    console.log(
-      "[MSG]",
-      "guild:", message.guild.id,
-      "channel:", message.channel.id,
-      "parent:", message.channel.parentId || null,
-      "author:", message.author.tag,
-      "attachments:", message.attachments?.size || 0,
-      "content:", JSON.stringify(message.content)
-    );
+    console.log("[MSG]", message.guild.id, message.channel.id, message.author.tag, JSON.stringify(message.content));
 
-    const member = await message.guild.members.fetch(message.author.id).catch(() => null);
-    if (!member) return;
-
+    const member = message.member || (await message.guild.members.fetch(message.author.id));
     const isGerente = member.roles.cache.has(cfg.GERENTE_ROLE_ID);
     const is00 = member.roles.cache.has(cfg.ROLE_00_ID);
 
     const content = (message.content || "").trim();
     const lower = content.toLowerCase();
 
-    // ✅ DEBUG ENVIO
-    if (lower === "!debugenvio") {
-      const ok = isEnvioChannel(message);
-      const lines = [
-        `🏷️ Servidor: **${cfg.NAME}**`,
-        `🧾 guildId: \`${message.guild.id}\``,
-        `#️⃣ channelId: \`${message.channel.id}\``,
-        `🧩 parentId (categoria): \`${message.channel.parentId || "null"}\``,
-        `✅ ENVIO_FARME_CHANNEL_ID (config): \`${cfg.ENVIO_FARME_CHANNEL_ID}\``,
-        `✅ ENVIO_FARME_CATEGORY_ID (config): \`${cfg.ENVIO_FARME_CATEGORY_ID || "null"}\``,
-        `📌 isEnvioChannel() => **${ok}**`,
-        `📎 attachments.size => **${message.attachments?.size || 0}**`,
-      ];
-      return message.reply(lines.join("\n"));
-    }
-
-    // ✅ DEBUG ROLES
-    if (lower === "!debugroles") {
-      const roles = member.roles.cache.map(r => `${r.name}(${r.id})`).slice(0, 50);
-      return message.reply(
-        `🏷️ Servidor: **${cfg.NAME}**\n` +
-        `👤 Você: <@${member.id}>\n` +
-        `👑 isGerente => **${isGerente}**\n` +
-        `🟦 is00 => **${is00}**\n` +
-        `🎭 Seus cargos (até 50):\n` +
-        roles.map(x => `• ${x}`).join("\n")
-      );
-    }
-
-    // ✅ STATUS
     if (lower === "!status") {
       const u = await rollToToday(message.guild.id, message.author.id);
 
@@ -608,18 +555,8 @@ client.on("messageCreate", async (message) => {
       return message.reply({ embeds: [embed] });
     }
 
-    // 🔥 FARME
     if (lower.startsWith("!farme")) {
-      // agora explica o motivo ao invés de "sumir"
-      if (!isEnvioChannel(message)) {
-        return message.reply(
-          `❌ Use o comando no canal certo.\n` +
-          `📌 Este canal: <#${message.channel.id}>\n` +
-          `✅ Canal permitido (config): <#${cfg.ENVIO_FARME_CHANNEL_ID}>\n` +
-          (cfg.ENVIO_FARME_CATEGORY_ID ? `✅ Categoria permitida: \`${cfg.ENVIO_FARME_CATEGORY_ID}\`\n` : "") +
-          `Dica: manda \`!debugenvio\` aqui que eu te digo exatamente o ID que o bot tá vendo.`
-        );
-      }
+      if (!isEnvioChannel(message)) return;
 
       const args = content.split(/\s+/);
       const tipo = (args[1] || "").toLowerCase();
@@ -631,13 +568,8 @@ client.on("messageCreate", async (message) => {
       if (isNaN(quantidade) || quantidade <= 0) {
         return message.reply("❌ Quantidade inválida. Ex: `!farme sementes 25`");
       }
-
-      // ⚠️ importante: isso só conta arquivo anexado (upload).
       if (!message.attachments.size) {
-        return message.reply(
-          "❌ Envie o print **anexado** na mesma mensagem do comando.\n" +
-          "Se o print estiver vindo como **embed** (não arquivo), o Discord não conta como attachment."
-        );
+        return message.reply("❌ Envie o print junto.");
       }
 
       const row = new ActionRowBuilder().addComponents(
@@ -660,7 +592,6 @@ client.on("messageCreate", async (message) => {
       });
     }
 
-    // ✏️ EDITAR (SÓ 00)
     if (lower.startsWith("!editar")) {
       if (!is00) return message.reply("❌ Apenas cargo **00** pode usar.");
 
@@ -796,13 +727,15 @@ client.on("messageCreate", async (message) => {
 
     void isGerente;
   } catch (e) {
-    console.error("Erro messageCreate:", e);
-    try { await message.reply("❌ Erro interno."); } catch {}
+    console.error("Erro messageCreate:", e?.stack || e);
+    try {
+      await message.reply("❌ Erro interno.");
+    } catch {}
   }
 });
 
 // ==========================
-// 🔘 BUTTONS
+// 🔘 BUTTONS (FIX + DEBUG)
 // ==========================
 client.on("interactionCreate", async (interaction) => {
   try {
@@ -811,9 +744,25 @@ client.on("interactionCreate", async (interaction) => {
     const cfg = getCfg(interaction.guild.id);
     if (!cfg) return;
 
-    const member = await interaction.guild.members.fetch(interaction.user.id);
+    // ✅ member robusto
+    const member = interaction.member ?? (await interaction.guild.members.fetch(interaction.user.id));
     const isGerente = member.roles.cache.has(cfg.GERENTE_ROLE_ID);
     const is00 = member.roles.cache.has(cfg.ROLE_00_ID);
+
+    // Debug rápido no log do Render:
+    console.log(
+      "[BTN]",
+      "guild=",
+      interaction.guild.id,
+      "user=",
+      interaction.user.id,
+      "customId=",
+      interaction.customId,
+      "is00=",
+      is00,
+      "isGerente=",
+      isGerente
+    );
 
     if (!isGerente && !is00) {
       return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
@@ -821,9 +770,17 @@ client.on("interactionCreate", async (interaction) => {
 
     const logChannel = getLogChannel(interaction.guild);
 
-    const [acao, userId, quantidadeStr, tipo] = interaction.customId.split("_");
+    const parts = interaction.customId.split("_");
+    const acao = parts[0];
+    const userId = parts[1];
+    const quantidadeStr = parts[2];
+    const tipo = parts[3];
+
     const quantidade = parseInt(quantidadeStr, 10);
-    const msgId = interaction.message.id;
+    const msgId = interaction.message?.id;
+
+    // ✅ evita crash se algo vier errado
+    if (!msgId) return interaction.reply({ content: "⚠️ Não consegui pegar o ID da mensagem.", ephemeral: true });
 
     await interaction.deferUpdate();
 
@@ -838,11 +795,16 @@ client.on("interactionCreate", async (interaction) => {
     const sendLogEmbed = async (title, description) => {
       if (!logChannel) return;
       const embed = new EmbedBuilder().setColor("#2b2d31").setTitle(title).setDescription(description).setTimestamp();
+
       const thumb = getThumb(interaction);
       if (thumb) embed.setThumbnail(thumb);
 
-      try { await logChannel.send({ embeds: [embed] }); }
-      catch { await logChannel.send(description).catch(() => null); }
+      try {
+        await logChannel.send({ embeds: [embed] });
+      } catch (err) {
+        console.log("[LOG_SEND_FAIL]", err?.message || err);
+        await logChannel.send(description).catch(() => null);
+      }
     };
 
     if (acao === "aprovar") {
@@ -862,15 +824,24 @@ client.on("interactionCreate", async (interaction) => {
         dia: todayKey(),
       });
 
-      await interaction.message.edit({
-        content:
-          `✅ **Aprovado**\n` +
-          `📦 ${tipo.toUpperCase()} • ${quantidade}\n` +
-          `➡️ Aplicado hoje: **${result.aplicado}** | Extra (amanhã): **${result.carry}**\n\n` +
-          `📄 Papel: **${u.papelHoje}/100** (extra: ${u.papelCarry})\n` +
-          `🌱 Sementes: **${u.sementesHoje}/100** (extra: ${u.sementesCarry})`,
-        components: [],
-      });
+      // ✅ editar mensagem — e se falhar, manda followUp com motivo (debug)
+      try {
+        await interaction.message.edit({
+          content:
+            `✅ **Aprovado**\n` +
+            `📦 ${tipo.toUpperCase()} • ${quantidade}\n` +
+            `➡️ Aplicado hoje: **${result.aplicado}** | Extra (amanhã): **${result.carry}**\n\n` +
+            `📄 Papel: **${u.papelHoje}/100** (extra: ${u.papelCarry})\n` +
+            `🌱 Sementes: **${u.sementesHoje}/100** (extra: ${u.sementesCarry})`,
+          components: [],
+        });
+      } catch (errEdit) {
+        console.error("[EDIT_FAIL]", errEdit?.stack || errEdit);
+        await interaction.followUp({
+          content: `⚠️ Aprovou no banco, mas falhei ao editar a mensagem. Motivo: \`${errEdit?.message || "erro"}\``,
+          ephemeral: true,
+        });
+      }
 
       const debtLine = formatDebtLine(Number(u.papelDebt || 0), Number(u.sementesDebt || 0));
 
@@ -901,10 +872,18 @@ client.on("interactionCreate", async (interaction) => {
         dia: todayKey(),
       });
 
-      await interaction.message.edit({
-        content: `❌ **Negado**\n📦 ${tipo.toUpperCase()} • ${quantidade}`,
-        components: [],
-      });
+      try {
+        await interaction.message.edit({
+          content: `❌ **Negado**\n📦 ${tipo.toUpperCase()} • ${quantidade}`,
+          components: [],
+        });
+      } catch (errEdit) {
+        console.error("[EDIT_FAIL]", errEdit?.stack || errEdit);
+        await interaction.followUp({
+          content: `⚠️ Negou no banco, mas falhei ao editar a mensagem. Motivo: \`${errEdit?.message || "erro"}\``,
+          ephemeral: true,
+        });
+      }
 
       await sendLogEmbed(
         `❌ FARME NEGADO — ${cfg.NAME}`,
@@ -919,12 +898,24 @@ client.on("interactionCreate", async (interaction) => {
 
     return interaction.followUp({ content: "⚠️ Ação inválida.", ephemeral: true });
   } catch (e) {
-    console.error("Erro interactionCreate:", e);
+    console.error("Erro interactionCreate:", e?.stack || e);
+
+    // ✅ Se for você (00), eu mostro o erro real pra você achar em 10s.
+    const showDetails =
+      interaction?.member?.roles?.cache?.some?.((r) => r.id === (getCfg(interaction.guild.id)?.ROLE_00_ID || "")) ||
+      false;
+
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.followUp({ content: "❌ Erro interno.", ephemeral: true });
+        await interaction.followUp({
+          content: showDetails ? `❌ Erro interno:\n\`${e?.message || e}\`` : "❌ Erro interno.",
+          ephemeral: true,
+        });
       } else {
-        await interaction.reply({ content: "❌ Erro interno.", ephemeral: true });
+        await interaction.reply({
+          content: showDetails ? `❌ Erro interno:\n\`${e?.message || e}\`` : "❌ Erro interno.",
+          ephemeral: true,
+        });
       }
     } catch {}
   }
@@ -938,7 +929,7 @@ client.on("interactionCreate", async (interaction) => {
     await initDB();
     await client.login(process.env.DISCORD_TOKEN);
   } catch (e) {
-    console.error("Falha ao iniciar:", e);
+    console.error("Falha ao iniciar:", e?.stack || e);
     process.exit(1);
   }
 })();
