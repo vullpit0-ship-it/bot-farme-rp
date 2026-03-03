@@ -9,7 +9,7 @@ const {
 } = require("discord.js");
 
 console.log(
-  "🔥 BUILD FINAL (FIX usuarios.id MIGRATION + !tabela + !relatorio + !naofarmou + !editar(reply) + !desfazer(reply)) 🔥",
+  "🔥 BUILD FINAL (FIX usuarios.id MIGRATION + !tabela + !relatorio + !naofarmou + !editar(reply) + !desfazer(reply) + DM 00:05) 🔥",
   new Date().toISOString()
 );
 
@@ -46,11 +46,13 @@ function getCfg(guildId) {
 
 const LOGO_URL = process.env.LOGO_URL || null;
 const META_DIARIA = 100;
+
+// ⏰ Fechamento diário (00:05)
 const DAILY_AUDIT_HOUR = 0;
 const DAILY_AUDIT_MIN = 5;
 
 // ==========================
-// 🌐 WEB
+// 🌐 WEB (Render healthcheck)
 // ==========================
 const app = express();
 app.get("/", (req, res) => res.send("Bot online ✅"));
@@ -174,6 +176,7 @@ async function initDB() {
 
   await ensureUniqueIndexUsuarios();
 
+  // Migração/reparo usuarios.id (caso antigo esteja TEXT ou sem default)
   if (await tableExists("usuarios")) {
     const info = await getUsuariosIdColumnInfo();
     if (info) {
@@ -255,6 +258,7 @@ async function initDB() {
 
   await ensureHistoricoIndexes();
 
+  // normaliza nulls
   await pool.query(
     `
     UPDATE usuarios
@@ -663,7 +667,7 @@ async function recalcTipoDia(dbClient, guildId, userId, tipo, dia, editedRowId, 
 }
 
 // ==========================
-// ✅ FECHAMENTO DIÁRIO
+// ✅ FECHAMENTO DIÁRIO + DM 00:05
 // ==========================
 async function getConfig(chave, defaultValue = null) {
   const { rows } = await pool.query(`SELECT valor FROM bot_config WHERE chave=$1`, [chave]);
@@ -724,12 +728,54 @@ async function runDailyAuditOnce() {
           [faltouP, faltouS, guild.id, u.userId]
         );
 
-        faltaram.push({ userId: u.userId, papel_total: totals.papel, sementes_total: totals.sementes, faltouP, faltouS });
+        faltaram.push({
+          userId: u.userId,
+          papel_total: totals.papel,
+          sementes_total: totals.sementes,
+          faltouP,
+          faltouS,
+        });
+      }
+    }
+
+    // 🔔 DM automática para quem não bateu a meta
+    for (const r of faltaram) {
+      try {
+        const member = await guild.members.fetch(r.userId).catch(() => null);
+        if (!member || member.user.bot) continue;
+
+        const totalFaltou = Number(r.faltouP || 0) + Number(r.faltouS || 0);
+
+        const embedDM = new EmbedBuilder()
+          .setColor("#2b2d31")
+          .setTitle("⚠️ Meta diária não atingida")
+          .setDescription(
+            `🏷️ Servidor: **${cfg.NAME}**\n` +
+            `📅 Dia analisado: **${diaAuditado}**\n\n` +
+            `📄 Papel: **${r.papel_total}/${META_DIARIA}**\n` +
+            `🌱 Sementes: **${r.sementes_total}/${META_DIARIA}**\n\n` +
+            `❌ Faltou:\n` +
+            `• Papel: **${r.faltouP}**\n` +
+            `• Sementes: **${r.faltouS}**\n\n` +
+            `📦 Total faltante: **${totalFaltou}**\n\n` +
+            `Essa quantidade foi adicionada ao seu **Farme atrasado**.`
+          )
+          .setTimestamp();
+
+        const thumb = getThumb(client);
+        if (thumb) embedDM.setThumbnail(thumb);
+
+        await member.send({ embeds: [embedDM] }).catch(() => null);
+      } catch (e) {
+        // ignora dm falhada
       }
     }
 
     const logChannel = getLogChannel(guild);
-    if (!logChannel) continue;
+    if (!logChannel) {
+      await setConfig(lastDoneKey, today);
+      continue;
+    }
 
     const thumb = getThumb(client);
 
@@ -743,8 +789,10 @@ async function runDailyAuditOnce() {
       await logChannel.send({ embeds: [embed] }).catch(() => null);
     } else {
       const lines = faltaram.map((r) => {
-        const pTxt = r.faltouP > 0 ? `❌ ${r.papel_total}/${META_DIARIA} (faltou ${r.faltouP})` : `✅ ${r.papel_total}/${META_DIARIA}`;
-        const sTxt = r.faltouS > 0 ? `❌ ${r.sementes_total}/${META_DIARIA} (faltou ${r.faltouS})` : `✅ ${r.sementes_total}/${META_DIARIA}`;
+        const pTxt =
+          r.faltouP > 0 ? `❌ ${r.papel_total}/${META_DIARIA} (faltou ${r.faltouP})` : `✅ ${r.papel_total}/${META_DIARIA}`;
+        const sTxt =
+          r.faltouS > 0 ? `❌ ${r.sementes_total}/${META_DIARIA} (faltou ${r.faltouS})` : `✅ ${r.sementes_total}/${META_DIARIA}`;
         return `• <@${r.userId}> — 📄 ${pTxt} | 🌱 ${sTxt}`;
       });
 
@@ -789,9 +837,9 @@ client.on("messageCreate", async (message) => {
     const lower = content.toLowerCase();
 
     // ==========================
-    // ✏️ !editar (SÓ 00) — reply no aprovado
-    // Ex: !editar 10
-    // Ex: !editar papel 10
+    // ✏️ !editar (SÓ 00) — reply no aprovado do BOT
+    // Ex: (reply) !editar 10
+    // Ex: (reply) !editar papel 10
     // ==========================
     if (lower.startsWith("!editar")) {
       if (!is00) return message.reply("❌ Só o **00** pode usar esse comando.");
@@ -845,32 +893,33 @@ client.on("messageCreate", async (message) => {
 
       const h2 = await getHistoricoAprovadoByMsgId(message.guild.id, refMsgId);
 
-      // tenta atualizar a mensagem aprovada do bot (mesmo canal do reply)
+      // tenta atualizar a mensagem aprovada do bot (no canal do reply)
       try {
         const refMsg = await message.channel.messages.fetch(refMsgId);
         if (refMsg?.author?.id === client.user.id) {
-          await refMsg.edit({
-            content:
-              `✅ **Aprovado (EDITADO)**\n` +
-              `📦 ${h.tipo.toUpperCase()} • ${newQty}\n` +
-              `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n\n` +
-              `👤 Usuário: <@${h.userId}>\n` +
-              `🛡️ Editado por: <@${message.author.id}>`,
-            components: [],
-          }).catch(() => null);
+          await refMsg
+            .edit({
+              content:
+                `✅ **Aprovado (EDITADO)**\n` +
+                `📦 ${h.tipo.toUpperCase()} • ${newQty}\n` +
+                `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n\n` +
+                `👤 Usuário: <@${h.userId}>\n` +
+                `🛡️ Editado por: <@${message.author.id}>`,
+              components: [],
+            })
+            .catch(() => null);
         }
       } catch {}
 
-      // embed resposta
       const embed = new EmbedBuilder()
         .setColor("#2b2d31")
         .setTitle("✏️ Farme editado com sucesso")
         .setDescription(
           `👤 Usuário: <@${h.userId}>\n` +
-          `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-          `📦 Nova quantidade: **${newQty}**\n` +
-          `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n` +
-          `📅 Dia: **${dia}**`
+            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
+            `📦 Nova quantidade: **${newQty}**\n` +
+            `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n` +
+            `📅 Dia: **${dia}**`
         )
         .setTimestamp();
 
@@ -879,7 +928,6 @@ client.on("messageCreate", async (message) => {
 
       await message.reply({ embeds: [embed] });
 
-      // log
       const logChannel = getLogChannel(message.guild);
       if (logChannel) {
         const logEmbed = new EmbedBuilder()
@@ -887,10 +935,10 @@ client.on("messageCreate", async (message) => {
           .setTitle(`✏️ FARME EDITADO — ${cfg.NAME}`)
           .setDescription(
             `👤 Usuário: <@${h.userId}>\n` +
-            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-            `📦 Nova quantidade: **${newQty}**\n` +
-            `➡️ Aplicado: **${h2?.aplicado ?? 0}** | Carry: **${h2?.carry ?? 0}**\n` +
-            `🛡️ Editado por: <@${message.author.id}>`
+              `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
+              `📦 Nova quantidade: **${newQty}**\n` +
+              `➡️ Aplicado: **${h2?.aplicado ?? 0}** | Carry: **${h2?.carry ?? 0}**\n` +
+              `🛡️ Editado por: <@${message.author.id}>`
           )
           .setTimestamp();
         if (thumb) logEmbed.setThumbnail(thumb);
@@ -901,7 +949,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================
-    // 🔁 !desfazer (SÓ 00) — reply no aprovado
+    // 🔁 !desfazer (SÓ 00) — reply no aprovado do BOT
     // ==========================
     if (lower === "!desfazer") {
       if (!is00) return message.reply("❌ Só o **00** pode usar esse comando.");
@@ -936,15 +984,17 @@ client.on("messageCreate", async (message) => {
       try {
         const refMsg = await message.channel.messages.fetch(refMsgId);
         if (refMsg?.author?.id === client.user.id) {
-          await refMsg.edit({
-            content:
-              `🔁 **DESFEITO**\n` +
-              `📦 ${h.tipo.toUpperCase()} • 0\n` +
-              `➡️ Aplicado hoje: **0** | Extra (amanhã): **0**\n\n` +
-              `👤 Usuário: <@${h.userId}>\n` +
-              `🛡️ Desfeito por: <@${message.author.id}>`,
-            components: [],
-          }).catch(() => null);
+          await refMsg
+            .edit({
+              content:
+                `🔁 **DESFEITO**\n` +
+                `📦 ${h.tipo.toUpperCase()} • 0\n` +
+                `➡️ Aplicado hoje: **0** | Extra (amanhã): **0**\n\n` +
+                `👤 Usuário: <@${h.userId}>\n` +
+                `🛡️ Desfeito por: <@${message.author.id}>`,
+              components: [],
+            })
+            .catch(() => null);
         }
       } catch {}
 
@@ -953,10 +1003,10 @@ client.on("messageCreate", async (message) => {
         .setTitle("🔁 Farme desfeito com sucesso")
         .setDescription(
           `👤 Usuário: <@${h.userId}>\n` +
-          `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-          `📦 Revertido para: **0**\n` +
-          `🛡️ Desfeito por: <@${message.author.id}>\n` +
-          `📅 Dia: **${dia}**`
+            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
+            `📦 Revertido para: **0**\n` +
+            `🛡️ Desfeito por: <@${message.author.id}>\n` +
+            `📅 Dia: **${dia}**`
         )
         .setTimestamp();
 
@@ -972,9 +1022,9 @@ client.on("messageCreate", async (message) => {
           .setTitle(`🔁 FARME DESFEITO — ${cfg.NAME}`)
           .setDescription(
             `👤 Usuário: <@${h.userId}>\n` +
-            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-            `📦 Revertido para 0\n` +
-            `🛡️ Desfeito por: <@${message.author.id}>`
+              `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
+              `📦 Revertido para 0\n` +
+              `🛡️ Desfeito por: <@${message.author.id}>`
           )
           .setTimestamp();
         if (thumb) logEmbed.setThumbnail(thumb);
@@ -998,7 +1048,12 @@ client.on("messageCreate", async (message) => {
       const top5 = tabela.slice(0, 5);
 
       const topTxt = top5.length
-        ? top5.map((r, i) => `${i + 1}. <@${r.userId}> — ✅ Total: **${r.total}** (📄 ${r.papel} | 🌱 ${r.sementes})`).join("\n")
+        ? top5
+            .map(
+              (r, i) =>
+                `${i + 1}. <@${r.userId}> — ✅ Total: **${r.total}** (📄 ${r.papel} | 🌱 ${r.sementes})`
+            )
+            .join("\n")
         : "Nenhum farme aprovado hoje.";
 
       const embed = new EmbedBuilder()
@@ -1006,11 +1061,11 @@ client.on("messageCreate", async (message) => {
         .setTitle(`📊 Relatório Geral — ${cfg.NAME}`)
         .setDescription(
           `📅 Dia: **${dia}**\n\n` +
-          `👥 Membros com farme aprovado: **${resumo.total_membros}**\n` +
-          `📄 Total Papel aprovado: **${resumo.papel_total}**\n` +
-          `🌱 Total Sementes aprovadas: **${resumo.sementes_total}**\n` +
-          `📦 Total Geral aprovado: **${totalGeral}**\n\n` +
-          `🏆 **Top 5 do dia:**\n${topTxt}`
+            `👥 Membros com farme aprovado: **${resumo.total_membros}**\n` +
+            `📄 Total Papel aprovado: **${resumo.papel_total}**\n` +
+            `🌱 Total Sementes aprovadas: **${resumo.sementes_total}**\n` +
+            `📦 Total Geral aprovado: **${totalGeral}**\n\n` +
+            `🏆 **Top 5 do dia:**\n${topTxt}`
         )
         .setTimestamp();
 
@@ -1022,6 +1077,7 @@ client.on("messageCreate", async (message) => {
 
     // ==========================
     // 🚫 !naofarmou (somente gerente/00)
+    // Uso: !naofarmou | !naofarmou @cargo | !naofarmou NomeDoCargo
     // ==========================
     if (lower.startsWith("!naofarmou")) {
       if (!isGerente && !is00) return message.reply("❌ Sem permissão.");
@@ -1080,7 +1136,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================
-    // 📊 !tabela
+    // 📊 !tabela (hoje/ontem)
     // ==========================
     if (lower.startsWith("!tabela")) {
       const parts = content.split(/\s+/);
@@ -1099,7 +1155,9 @@ client.on("messageCreate", async (message) => {
         return message.reply(`📊 **Tabela (${tituloDia})**\nNenhum farme **aprovado** em **${dia}**.`);
       }
 
-      const lines = rows.map((r, i) => `${i + 1}. <@${r.userId}> — 📄 **${r.papel}** | 🌱 **${r.sementes}** | ✅ Total: **${r.total}**`);
+      const lines = rows.map(
+        (r, i) => `${i + 1}. <@${r.userId}> — 📄 **${r.papel}** | 🌱 **${r.sementes}** | ✅ Total: **${r.total}**`
+      );
       const thumb = getThumb(client);
       const chunks = chunkTextLines(lines, 3800);
 
@@ -1157,7 +1215,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================
-    // !farme
+    // !farme (somente canal ENVIO)
     // ==========================
     if (lower.startsWith("!farme")) {
       if (!isEnvioChannel(message)) return;
@@ -1177,8 +1235,14 @@ client.on("messageCreate", async (message) => {
       }
 
       const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`aprovar_${message.author.id}_${quantidade}_${tipo}`).setLabel("Aprovar").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`negar_${message.author.id}_${quantidade}_${tipo}`).setLabel("Negar").setStyle(ButtonStyle.Danger)
+        new ButtonBuilder()
+          .setCustomId(`aprovar_${message.author.id}_${quantidade}_${tipo}`)
+          .setLabel("Aprovar")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`negar_${message.author.id}_${quantidade}_${tipo}`)
+          .setLabel("Negar")
+          .setStyle(ButtonStyle.Danger)
       );
 
       return message.reply({
@@ -1214,7 +1278,19 @@ client.on("interactionCreate", async (interaction) => {
     const isGerente = member.roles.cache.has(cfg.GERENTE_ROLE_ID);
     const is00 = member.roles.cache.has(cfg.ROLE_00_ID);
 
-    console.log("[BTN]", "guild=", interaction.guild.id, "user=", interaction.user.id, "customId=", interaction.customId, "is00=", is00, "isGerente=", isGerente);
+    console.log(
+      "[BTN]",
+      "guild=",
+      interaction.guild.id,
+      "user=",
+      interaction.user.id,
+      "customId=",
+      interaction.customId,
+      "is00=",
+      is00,
+      "isGerente=",
+      isGerente
+    );
 
     if (!isGerente && !is00) {
       return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
@@ -1271,15 +1347,18 @@ client.on("interactionCreate", async (interaction) => {
         dia: todayKey(),
       });
 
-      await interaction.message.edit({
-        content:
-          `✅ **Aprovado**\n` +
-          `📦 ${tipo.toUpperCase()} • ${quantidade}\n` +
-          `➡️ Aplicado hoje: **${result.aplicado}** | Extra (amanhã): **${result.carry}**\n\n` +
-          `📄 Papel: **${u.papelHoje}/100** (extra: ${u.papelCarry})\n` +
-          `🌱 Sementes: **${u.sementesHoje}/100** (extra: ${u.sementesCarry})`,
-        components: [],
-      }).catch(() => null);
+      await interaction.message
+        .edit({
+          content:
+            `✅ **Aprovado**\n` +
+            `📦 ${tipo.toUpperCase()} • ${quantidade}\n` +
+            `➡️ Aplicado hoje: **${result.aplicado}** | Extra (amanhã): **${result.carry}**\n\n` +
+            `📄 Papel: **${u.papelHoje}/100** (extra: ${u.papelCarry})\n` +
+            `🌱 Sementes: **${u.sementesHoje}/100** (extra: ${u.sementesCarry})\n\n` +
+            `📝 (Para o 00) Reply aqui e use: **!editar 10** ou **!desfazer**`,
+          components: [],
+        })
+        .catch(() => null);
 
       await sendLogEmbed(
         `✅ FARME APROVADO — ${cfg.NAME}`,
@@ -1302,10 +1381,12 @@ client.on("interactionCreate", async (interaction) => {
         dia: todayKey(),
       });
 
-      await interaction.message.edit({
-        content: `❌ **Negado**\n📦 ${tipo.toUpperCase()} • ${quantidade}`,
-        components: [],
-      }).catch(() => null);
+      await interaction.message
+        .edit({
+          content: `❌ **Negado**\n📦 ${tipo.toUpperCase()} • ${quantidade}`,
+          components: [],
+        })
+        .catch(() => null);
 
       await sendLogEmbed(
         `❌ FARME NEGADO — ${cfg.NAME}`,
