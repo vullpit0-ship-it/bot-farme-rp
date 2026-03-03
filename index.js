@@ -8,7 +8,7 @@ const {
   Partials,
 } = require("discord.js");
 
-console.log("🔥 BUILD (FIX DB + FIX BUTTONS) 🔥", new Date().toISOString());
+console.log("🔥 BUILD FINAL (DB UNIQUE + BUTTONS FIX) 🔥", new Date().toISOString());
 
 const express = require("express");
 const { Pool } = require("pg");
@@ -41,8 +41,13 @@ function getCfg(guildId) {
   return CONFIGS[guildId] || null;
 }
 
+// ✅ Opcional: logo custom pro log (Render -> Environment -> LOGO_URL)
 const LOGO_URL = process.env.LOGO_URL || null;
+
+// ✅ Meta diária obrigatória
 const META_DIARIA = 100;
+
+// ✅ Horário do “fechamento do dia”
 const DAILY_AUDIT_HOUR = 0;
 const DAILY_AUDIT_MIN = 5;
 
@@ -82,6 +87,7 @@ function yesterdayKey() {
   return d.toDateString();
 }
 
+// thumbnail do embed (logo custom OU avatar do bot)
 function getThumb(interactionOrClient) {
   const avatar =
     interactionOrClient?.user?.displayAvatarURL?.() ||
@@ -91,7 +97,7 @@ function getThumb(interactionOrClient) {
 }
 
 // ==========================
-// 🧱 INIT DB (COM MIGRAÇÃO)
+// 🧱 INIT DB (VERSÃO FINAL)
 // ==========================
 async function initDB() {
   // Cria tabelas se não existirem
@@ -100,12 +106,12 @@ async function initDB() {
       "guildId" TEXT NOT NULL,
       "userId"  TEXT NOT NULL,
       "ultimoDia" TEXT,
-      "papelHoje" INTEGER,
-      "sementesHoje" INTEGER,
-      "papelCarry" INTEGER,
-      "sementesCarry" INTEGER,
-      "papelDebt" INTEGER,
-      "sementesDebt" INTEGER
+      "papelHoje" INTEGER DEFAULT 0,
+      "sementesHoje" INTEGER DEFAULT 0,
+      "papelCarry" INTEGER DEFAULT 0,
+      "sementesCarry" INTEGER DEFAULT 0,
+      "papelDebt" INTEGER DEFAULT 0,
+      "sementesDebt" INTEGER DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS historico (
@@ -130,32 +136,20 @@ async function initDB() {
     );
   `);
 
-  // Migrações seguras (se a tabela já existia sem algumas colunas)
-  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "guildId" TEXT;`);
-  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "userId" TEXT;`);
-  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "ultimoDia" TEXT;`);
-  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "papelHoje" INTEGER;`);
-  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "sementesHoje" INTEGER;`);
-  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "papelCarry" INTEGER;`);
-  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "sementesCarry" INTEGER;`);
-  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "papelDebt" INTEGER;`);
-  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "sementesDebt" INTEGER;`);
+  // Garante UNIQUE para o ON CONFLICT funcionar (SEM mexer em PK antiga)
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS usuarios_guild_user_unique
+    ON usuarios ("guildId","userId");
+  `);
+  console.log("DB: UNIQUE usuarios_guild_user_unique OK");
 
-  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS "guildId" TEXT;`);
-  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS "userId" TEXT;`);
-  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS tipo TEXT;`);
-  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS quantidade INTEGER;`);
-  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS status TEXT;`);
-  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS data TEXT;`);
-  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS dia TEXT;`);
-  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS "msgId" TEXT;`);
-  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS "gerenteId" TEXT;`);
-  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS aplicado INTEGER;`);
-  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS carry INTEGER;`);
-  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
-  await pool.query(`UPDATE historico SET created_at = NOW() WHERE created_at IS NULL;`);
+  // Índices úteis
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico ("msgId");`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_dia ON historico ("dia");`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_created_at ON historico (created_at);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_guild_user_dia ON historico ("guildId","userId","dia");`);
 
-  // Defaults
+  // Corrige valores null antigos
   await pool.query(
     `
     UPDATE usuarios
@@ -171,48 +165,6 @@ async function initDB() {
     [todayKey()]
   );
 
-  // Índices do histórico
-  try {
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico ("msgId");`);
-  } catch {}
-  try {
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_dia ON historico ("dia");`);
-  } catch {}
-  try {
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_created_at ON historico (created_at);`);
-  } catch {}
-  try {
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_guild_user_dia ON historico ("guildId","userId","dia");`);
-  } catch {}
-
-  // ✅ CORREÇÃO PRINCIPAL DO SEU ERRO:
-  // garante UNIQUE/PK em ("guildId","userId") para o ON CONFLICT funcionar.
-  // Se tiver duplicados antigos, isso pode falhar e vai imprimir um aviso.
-  try {
-    await pool.query(`
-      ALTER TABLE usuarios
-      ADD CONSTRAINT usuarios_pk PRIMARY KEY ("guildId","userId");
-    `);
-    console.log("DB: PK usuarios_pk OK");
-  } catch (e) {
-    // geralmente falha se já existe PK ou se tem duplicados
-    const msg = e?.message || String(e);
-    if (!msg.toLowerCase().includes("already exists")) {
-      console.warn("⚠️ Não consegui criar PRIMARY KEY em usuarios (pode ter duplicados).");
-      console.warn("⚠️ Rode o SQL de limpeza/unique no Supabase. Erro:", msg);
-    }
-  }
-
-  try {
-    await pool.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS usuarios_guild_user_unique
-      ON usuarios ("guildId","userId");
-    `);
-    console.log("DB: UNIQUE usuarios_guild_user_unique OK");
-  } catch (e) {
-    console.warn("⚠️ Não consegui criar UNIQUE INDEX (provável duplicado). Erro:", e?.message || e);
-  }
-
   console.log("DB OK (PostgreSQL / Supabase)");
 }
 
@@ -222,7 +174,7 @@ async function initDB() {
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers, // ✅ ajuda muito com roles/cache
+    GatewayIntentBits.GuildMembers, // ✅ roles/cache
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
@@ -255,7 +207,7 @@ async function ensureUser(guildId, userId) {
 
   const hoje = todayKey();
 
-  // ✅ agora vai funcionar porque criamos PK/UNIQUE em ("guildId","userId")
+  // ✅ ON CONFLICT agora funciona por causa do UNIQUE INDEX
   await pool.query(
     `INSERT INTO usuarios ("guildId","userId","ultimoDia","papelHoje","sementesHoje","papelCarry","sementesCarry","papelDebt","sementesDebt")
      VALUES ($1,$2,$3,0,0,0,0,0,0)
@@ -267,6 +219,7 @@ async function ensureUser(guildId, userId) {
   return res.rows[0];
 }
 
+// quando vira o dia: começa o dia com o extra
 async function rollToToday(guildId, userId) {
   const hoje = todayKey();
   const u = await ensureUser(guildId, userId);
@@ -330,6 +283,7 @@ function formatAtrasadoTotalLine(papelDebt, sementesDebt) {
   return `📦 Atrasado total acumulado: **${total}**`;
 }
 
+// ✅ total aprovado do dia (aplicado)
 async function getTotaisDia(guildId, userId, diaStr) {
   const { rows } = await pool.query(
     `
@@ -348,6 +302,8 @@ async function getTotaisDia(guildId, userId, diaStr) {
   };
 }
 
+// aplica aprovação respeitando limite 100/dia por tipo
+// overflow (>100) quita dívida; o que sobrar vira extra
 async function applyFarm(guildId, userId, tipo, quantidade) {
   const u0 = await rollToToday(guildId, userId);
 
@@ -553,6 +509,7 @@ client.on("messageCreate", async (message) => {
     const content = (message.content || "").trim();
     const lower = content.toLowerCase();
 
+    // ✅ STATUS
     if (lower === "!status") {
       const u = await rollToToday(message.guild.id, message.author.id);
 
@@ -587,6 +544,7 @@ client.on("messageCreate", async (message) => {
       return message.reply({ embeds: [embed] });
     }
 
+    // 🔥 FARME
     if (lower.startsWith("!farme")) {
       if (!isEnvioChannel(message)) return;
 
@@ -624,6 +582,7 @@ client.on("messageCreate", async (message) => {
       });
     }
 
+    // ✏️ EDITAR (SÓ 00) - inclui extra
     if (lower.startsWith("!editar")) {
       if (!is00) return message.reply("❌ Apenas cargo **00** pode usar.");
 
@@ -767,7 +726,7 @@ client.on("messageCreate", async (message) => {
 });
 
 // ==========================
-// 🔘 BUTTONS (FIX + DEBUG)
+// 🔘 BUTTONS (FIX FINAL)
 // ==========================
 client.on("interactionCreate", async (interaction) => {
   try {
@@ -816,7 +775,7 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.deferUpdate();
     } catch (e) {
       console.log("[DEFER_FAIL]", e?.message || e);
-      return; // se expirou, não dá pra responder
+      return;
     }
 
     if (await alreadyProcessed(interaction.guild.id, msgId)) {
