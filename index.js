@@ -8,7 +8,7 @@ const {
   Partials,
 } = require("discord.js");
 
-console.log("🔥 BUILD (DEBUG BUTTONS) 🔥", new Date().toISOString());
+console.log("🔥 BUILD (FIX DB + FIX BUTTONS) 🔥", new Date().toISOString());
 
 const express = require("express");
 const { Pool } = require("pg");
@@ -94,6 +94,7 @@ function getThumb(interactionOrClient) {
 // 🧱 INIT DB (COM MIGRAÇÃO)
 // ==========================
 async function initDB() {
+  // Cria tabelas se não existirem
   await pool.query(`
     CREATE TABLE IF NOT EXISTS usuarios (
       "guildId" TEXT NOT NULL,
@@ -104,8 +105,7 @@ async function initDB() {
       "papelCarry" INTEGER,
       "sementesCarry" INTEGER,
       "papelDebt" INTEGER,
-      "sementesDebt" INTEGER,
-      PRIMARY KEY ("guildId","userId")
+      "sementesDebt" INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS historico (
@@ -130,6 +130,7 @@ async function initDB() {
     );
   `);
 
+  // Migrações seguras (se a tabela já existia sem algumas colunas)
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "guildId" TEXT;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "userId" TEXT;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "ultimoDia" TEXT;`);
@@ -154,6 +155,7 @@ async function initDB() {
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
   await pool.query(`UPDATE historico SET created_at = NOW() WHERE created_at IS NULL;`);
 
+  // Defaults
   await pool.query(
     `
     UPDATE usuarios
@@ -169,6 +171,7 @@ async function initDB() {
     [todayKey()]
   );
 
+  // Índices do histórico
   try {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico ("msgId");`);
   } catch {}
@@ -182,17 +185,44 @@ async function initDB() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_guild_user_dia ON historico ("guildId","userId","dia");`);
   } catch {}
 
+  // ✅ CORREÇÃO PRINCIPAL DO SEU ERRO:
+  // garante UNIQUE/PK em ("guildId","userId") para o ON CONFLICT funcionar.
+  // Se tiver duplicados antigos, isso pode falhar e vai imprimir um aviso.
+  try {
+    await pool.query(`
+      ALTER TABLE usuarios
+      ADD CONSTRAINT usuarios_pk PRIMARY KEY ("guildId","userId");
+    `);
+    console.log("DB: PK usuarios_pk OK");
+  } catch (e) {
+    // geralmente falha se já existe PK ou se tem duplicados
+    const msg = e?.message || String(e);
+    if (!msg.toLowerCase().includes("already exists")) {
+      console.warn("⚠️ Não consegui criar PRIMARY KEY em usuarios (pode ter duplicados).");
+      console.warn("⚠️ Rode o SQL de limpeza/unique no Supabase. Erro:", msg);
+    }
+  }
+
+  try {
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS usuarios_guild_user_unique
+      ON usuarios ("guildId","userId");
+    `);
+    console.log("DB: UNIQUE usuarios_guild_user_unique OK");
+  } catch (e) {
+    console.warn("⚠️ Não consegui criar UNIQUE INDEX (provável duplicado). Erro:", e?.message || e);
+  }
+
   console.log("DB OK (PostgreSQL / Supabase)");
 }
 
 // ==========================
 // 🤖 CLIENT
 // ==========================
-// ✅ AQUI você ativa GuildMembers
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers, // ✅ importante p/ roles/cache e evita dor de cabeça
+    GatewayIntentBits.GuildMembers, // ✅ ajuda muito com roles/cache
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
@@ -224,6 +254,8 @@ async function ensureUser(guildId, userId) {
   if (res.rows[0]) return res.rows[0];
 
   const hoje = todayKey();
+
+  // ✅ agora vai funcionar porque criamos PK/UNIQUE em ("guildId","userId")
   await pool.query(
     `INSERT INTO usuarios ("guildId","userId","ultimoDia","papelHoje","sementesHoje","papelCarry","sementesCarry","papelDebt","sementesDebt")
      VALUES ($1,$2,$3,0,0,0,0,0,0)
@@ -744,12 +776,10 @@ client.on("interactionCreate", async (interaction) => {
     const cfg = getCfg(interaction.guild.id);
     if (!cfg) return;
 
-    // ✅ member robusto
     const member = interaction.member ?? (await interaction.guild.members.fetch(interaction.user.id));
     const isGerente = member.roles.cache.has(cfg.GERENTE_ROLE_ID);
     const is00 = member.roles.cache.has(cfg.ROLE_00_ID);
 
-    // Debug rápido no log do Render:
     console.log(
       "[BTN]",
       "guild=",
@@ -779,10 +809,15 @@ client.on("interactionCreate", async (interaction) => {
     const quantidade = parseInt(quantidadeStr, 10);
     const msgId = interaction.message?.id;
 
-    // ✅ evita crash se algo vier errado
     if (!msgId) return interaction.reply({ content: "⚠️ Não consegui pegar o ID da mensagem.", ephemeral: true });
 
-    await interaction.deferUpdate();
+    // ✅ FIX: evita "Unknown interaction"
+    try {
+      await interaction.deferUpdate();
+    } catch (e) {
+      console.log("[DEFER_FAIL]", e?.message || e);
+      return; // se expirou, não dá pra responder
+    }
 
     if (await alreadyProcessed(interaction.guild.id, msgId)) {
       return interaction.followUp({ content: "⚠️ Esse farme já foi processado.", ephemeral: true });
@@ -824,7 +859,6 @@ client.on("interactionCreate", async (interaction) => {
         dia: todayKey(),
       });
 
-      // ✅ editar mensagem — e se falhar, manda followUp com motivo (debug)
       try {
         await interaction.message.edit({
           content:
@@ -900,22 +934,11 @@ client.on("interactionCreate", async (interaction) => {
   } catch (e) {
     console.error("Erro interactionCreate:", e?.stack || e);
 
-    // ✅ Se for você (00), eu mostro o erro real pra você achar em 10s.
-    const showDetails =
-      interaction?.member?.roles?.cache?.some?.((r) => r.id === (getCfg(interaction.guild.id)?.ROLE_00_ID || "")) ||
-      false;
-
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.followUp({
-          content: showDetails ? `❌ Erro interno:\n\`${e?.message || e}\`` : "❌ Erro interno.",
-          ephemeral: true,
-        });
+        await interaction.followUp({ content: "❌ Erro interno.", ephemeral: true });
       } else {
-        await interaction.reply({
-          content: showDetails ? `❌ Erro interno:\n\`${e?.message || e}\`` : "❌ Erro interno.",
-          ephemeral: true,
-        });
+        await interaction.reply({ content: "❌ Erro interno.", ephemeral: true });
       }
     } catch {}
   }
