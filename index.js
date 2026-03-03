@@ -8,25 +8,59 @@ const {
   Partials,
 } = require("discord.js");
 
-console.log("🔥 NOVA BUILD CARREGADA 🔥", new Date().toISOString());
+console.log("🔥 BUILD V999 (DEBUG OK) 🔥", new Date().toISOString());
 
 const express = require("express");
 const { Pool } = require("pg");
 
 // ==========================
-// ✅ IDS FIXOS
+// ✅ CONFIG POR SERVIDOR
 // ==========================
-const GERENTE_ROLE_ID = "1477779548484538539";
-const ROLE_00_ID = "1477850489189044365";
+// ATENÇÃO: as CHAVES do CONFIGS precisam ser GUILD ID (ID do servidor), NÃO canal/categoria.
+const GUILD_ID_TESTE = "1477774289414656213";
+const GUILD_ID_NOVA_ORDEM = "1469111028796227728";
 
-const LOG_CHANNEL_ID = "1477800551340310651";
-const ENVIO_FARME_CHANNEL_ID = "1477777883714818098";
+const CONFIGS = {
+  [GUILD_ID_TESTE]: {
+    NAME: "TESTE",
+    GERENTE_ROLE_ID: "1477779548484538539",
+    ROLE_00_ID: "1477850489189044365",
+    LOG_CHANNEL_ID: "1477800551340310651",
+    ENVIO_FARME_CHANNEL_ID: "1477777883714818098",
+
+    // opcional (se quiser permitir por categoria)
+    // ENVIO_FARME_CATEGORY_ID: "ID_DA_CATEGORIA_AQUI",
+  },
+
+  [GUILD_ID_NOVA_ORDEM]: {
+    NAME: "NOVA ORDEM",
+    GERENTE_ROLE_ID: "1469111029161136386",
+    ROLE_00_ID: "1469111029161136392",
+    LOG_CHANNEL_ID: "1478096038114885704",
+    ENVIO_FARME_CHANNEL_ID: "1478095912789082284",
+
+    // opcional: se o #farme-diario está dentro da categoria BAU MEMBRO,
+    // você pode colocar o ID da categoria aqui (parentId).
+    // ENVIO_FARME_CATEGORY_ID: "1469111031161819289",
+  },
+};
+
+function getCfg(guildId) {
+  return CONFIGS[guildId] || null;
+}
 
 // ✅ Opcional: logo custom pro log (Render -> Environment -> LOGO_URL)
 const LOGO_URL = process.env.LOGO_URL || null;
 
+// ✅ Meta diária obrigatória
+const META_DIARIA = 100;
+
+// ✅ Horário do “fechamento do dia”
+const DAILY_AUDIT_HOUR = 0;
+const DAILY_AUDIT_MIN = 5;
+
 // ==========================
-// 🌐 WEB
+// 🌐 WEB (mantém acordado com UptimeRobot)
 // ==========================
 const app = express();
 app.get("/", (req, res) => res.send("Bot online ✅"));
@@ -55,9 +89,9 @@ function nowBR() {
 function todayKey() {
   return new Date().toDateString();
 }
-function tomorrowKey() {
+function yesterdayKey() {
   const d = new Date();
-  d.setDate(d.getDate() + 1);
+  d.setDate(d.getDate() - 1);
   return d.toDateString();
 }
 
@@ -71,21 +105,26 @@ function getThumb(interactionOrClient) {
 }
 
 // ==========================
-// 🧱 INIT DB (COM MIGRAÇÃO)
+// 🧱 INIT DB (COM MIGRAÇÃO) - POR SERVIDOR (guildId)
 // ==========================
 async function initDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS usuarios (
-      id TEXT PRIMARY KEY,
+      "guildId" TEXT NOT NULL,
+      "userId"  TEXT NOT NULL,
       "ultimoDia" TEXT,
       "papelHoje" INTEGER,
       "sementesHoje" INTEGER,
       "papelCarry" INTEGER,
-      "sementesCarry" INTEGER
+      "sementesCarry" INTEGER,
+      "papelDebt" INTEGER,
+      "sementesDebt" INTEGER,
+      PRIMARY KEY ("guildId","userId")
     );
 
     CREATE TABLE IF NOT EXISTS historico (
       id BIGSERIAL PRIMARY KEY,
+      "guildId" TEXT,
       "userId" TEXT,
       tipo TEXT,
       quantidade INTEGER,
@@ -95,18 +134,28 @@ async function initDB() {
       "msgId" TEXT,
       "gerenteId" TEXT,
       aplicado INTEGER,
-      carry INTEGER
+      carry INTEGER,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS bot_config (
+      chave TEXT PRIMARY KEY,
+      valor TEXT
     );
   `);
 
-  // usuarios
+  // migrações seguras
+  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "guildId" TEXT;`);
+  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "userId" TEXT;`);
+  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "ultimoDia" TEXT;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "papelHoje" INTEGER;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "sementesHoje" INTEGER;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "papelCarry" INTEGER;`);
   await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "sementesCarry" INTEGER;`);
-  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "ultimoDia" TEXT;`);
+  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "papelDebt" INTEGER;`);
+  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "sementesDebt" INTEGER;`);
 
-  // historico
+  await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS "guildId" TEXT;`);
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS "userId" TEXT;`);
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS tipo TEXT;`);
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS quantidade INTEGER;`);
@@ -117,8 +166,6 @@ async function initDB() {
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS "gerenteId" TEXT;`);
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS aplicado INTEGER;`);
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS carry INTEGER;`);
-
-  // ranking semanal / histórico (mantém, não atrapalha)
   await pool.query(`ALTER TABLE historico ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
   await pool.query(`UPDATE historico SET created_at = NOW() WHERE created_at IS NULL;`);
 
@@ -131,27 +178,18 @@ async function initDB() {
       "sementesHoje" = COALESCE("sementesHoje", 0),
       "papelCarry" = COALESCE("papelCarry", 0),
       "sementesCarry" = COALESCE("sementesCarry", 0),
+      "papelDebt" = COALESCE("papelDebt", 0),
+      "sementesDebt" = COALESCE("sementesDebt", 0),
       "ultimoDia" = COALESCE("ultimoDia", $1)
   `,
     [todayKey()]
   );
 
   // índices
-  try {
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico ("msgId");`);
-  } catch (e) {
-    console.error("Aviso: falha ao criar idx_historico_msgId:", e?.message || e);
-  }
-  try {
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_dia ON historico ("dia");`);
-  } catch (e) {
-    console.error("Aviso: falha ao criar idx_historico_dia:", e?.message || e);
-  }
-  try {
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_created_at ON historico (created_at);`);
-  } catch (e) {
-    console.error("Aviso: falha ao criar idx_historico_created_at:", e?.message || e);
-  }
+  try { await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico ("msgId");`); } catch {}
+  try { await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_dia ON historico ("dia");`); } catch {}
+  try { await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_created_at ON historico (created_at);`); } catch {}
+  try { await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_guild_user_dia ON historico ("guildId","userId","dia");`); } catch {}
 
   console.log("DB OK (PostgreSQL / Supabase)");
 }
@@ -162,57 +200,71 @@ async function initDB() {
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,     // ✅ ADICIONADO
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
   partials: [Partials.Channel],
 });
 
-client.once("clientReady", () => {
+// mantém compatibilidade (algumas versões usam "ready")
+client.once("ready", () => {
   console.log("Bot online como", client.user?.tag);
+  startDailyAuditLoop().catch((e) => console.error("Erro startDailyAuditLoop:", e));
 });
 
 // ==========================
 // 🧠 HELPERS
 // ==========================
 function getLogChannel(guild) {
-  return guild.channels.cache.get(LOG_CHANNEL_ID) || null;
+  const cfg = getCfg(guild.id);
+  if (!cfg) return null;
+  return guild.channels.cache.get(cfg.LOG_CHANNEL_ID) || null;
 }
 
 function isEnvioChannel(message) {
-  return (
-    message.channel.id === ENVIO_FARME_CHANNEL_ID ||
-    message.channel.parentId === ENVIO_FARME_CHANNEL_ID
-  );
+  const cfg = getCfg(message.guild.id);
+  if (!cfg) return false;
+
+  const chId = message.channel.id;
+  const parentId = message.channel.parentId || null;
+
+  if (chId === cfg.ENVIO_FARME_CHANNEL_ID) return true;
+
+  // ✅ opcional: permitir categoria também
+  if (cfg.ENVIO_FARME_CATEGORY_ID && parentId === cfg.ENVIO_FARME_CATEGORY_ID) return true;
+
+  // (mantive seu comportamento antigo: se você colocar categoria no ENVIO_FARME_CHANNEL_ID)
+  if (parentId === cfg.ENVIO_FARME_CHANNEL_ID) return true;
+
+  return false;
 }
 
-async function ensureUser(userId) {
-  let res = await pool.query(`SELECT * FROM usuarios WHERE id = $1`, [userId]);
+async function ensureUser(guildId, userId) {
+  let res = await pool.query(`SELECT * FROM usuarios WHERE "guildId"=$1 AND "userId"=$2`, [guildId, userId]);
   if (res.rows[0]) return res.rows[0];
 
   const hoje = todayKey();
   await pool.query(
-    `INSERT INTO usuarios (id, "ultimoDia", "papelHoje", "sementesHoje", "papelCarry", "sementesCarry")
-     VALUES ($1, $2, 0, 0, 0, 0)
-     ON CONFLICT (id) DO NOTHING`,
-    [userId, hoje]
+    `INSERT INTO usuarios ("guildId","userId","ultimoDia","papelHoje","sementesHoje","papelCarry","sementesCarry","papelDebt","sementesDebt")
+     VALUES ($1,$2,$3,0,0,0,0,0,0)
+     ON CONFLICT ("guildId","userId") DO NOTHING`,
+    [guildId, userId, hoje]
   );
 
-  res = await pool.query(`SELECT * FROM usuarios WHERE id = $1`, [userId]);
+  res = await pool.query(`SELECT * FROM usuarios WHERE "guildId"=$1 AND "userId"=$2`, [guildId, userId]);
   return res.rows[0];
 }
 
-// quando vira o dia: começa o dia com o extra (excesso de ontem)
-async function rollToToday(userId) {
+async function rollToToday(guildId, userId) {
   const hoje = todayKey();
-  const u = await ensureUser(userId);
+  const u = await ensureUser(guildId, userId);
 
   if (u.ultimoDia === hoje) return u;
 
   const papelCarry = Number(u.papelCarry || 0);
   const sementesCarry = Number(u.sementesCarry || 0);
 
-  // entra no novo dia já contando extra (até 100), resto continua em extra
   const papelHoje = Math.min(100, papelCarry);
   const sementesHoje = Math.min(100, sementesCarry);
 
@@ -221,131 +273,246 @@ async function rollToToday(userId) {
 
   await pool.query(
     `UPDATE usuarios
-     SET "ultimoDia" = $1,
-         "papelHoje" = $2,
-         "sementesHoje" = $3,
-         "papelCarry" = $4,
-         "sementesCarry" = $5
-     WHERE id = $6`,
-    [hoje, papelHoje, sementesHoje, novoPapelCarry, novoSementesCarry, userId]
+     SET "ultimoDia"=$1,
+         "papelHoje"=$2,
+         "sementesHoje"=$3,
+         "papelCarry"=$4,
+         "sementesCarry"=$5
+     WHERE "guildId"=$6 AND "userId"=$7`,
+    [hoje, papelHoje, sementesHoje, novoPapelCarry, novoSementesCarry, guildId, userId]
   );
 
-  const res = await pool.query(`SELECT * FROM usuarios WHERE id = $1`, [userId]);
+  const res = await pool.query(`SELECT * FROM usuarios WHERE "guildId"=$1 AND "userId"=$2`, [guildId, userId]);
   return res.rows[0];
 }
 
-async function insertHistorico({ userId, tipo, quantidade, status, msgId, gerenteId, aplicado, carry, dia }) {
+async function insertHistorico({ guildId, userId, tipo, quantidade, status, msgId, gerenteId, aplicado, carry, dia }) {
   await pool.query(
-    `INSERT INTO historico ("userId", tipo, quantidade, status, data, dia, "msgId", "gerenteId", aplicado, carry)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-    [userId, tipo, quantidade, status, nowBR(), dia || todayKey(), msgId, gerenteId, aplicado ?? null, carry ?? null]
+    `INSERT INTO historico ("guildId","userId",tipo,quantidade,status,data,dia,"msgId","gerenteId",aplicado,carry)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [guildId, userId, tipo, quantidade, status, nowBR(), dia || todayKey(), msgId, gerenteId, aplicado ?? null, carry ?? null]
   );
 }
 
-async function alreadyProcessed(msgId) {
+async function alreadyProcessed(guildId, msgId) {
   const { rows } = await pool.query(
-    `SELECT id FROM historico WHERE "msgId" = $1 AND (status='APROVADO' OR status='NEGADO') LIMIT 1`,
-    [msgId]
+    `SELECT id FROM historico WHERE "guildId"=$1 AND "msgId"=$2 AND (status='APROVADO' OR status='NEGADO') LIMIT 1`,
+    [guildId, msgId]
   );
   return !!rows[0];
 }
 
-// aplica aprovação respeitando limite 100/dia por tipo e joga excesso para extra
-async function applyFarm(userId, tipo, quantidade) {
-  const u0 = await rollToToday(userId);
+function formatDebtLine(papelDebt, sementesDebt) {
+  const parts = [];
+  if (papelDebt > 0) parts.push(`PAPEL **${papelDebt}**`);
+  if (sementesDebt > 0) parts.push(`SEMENTES **${sementesDebt}**`);
+  if (!parts.length) return null;
+  return `❌ Farme atrasado: ${parts.join(" | ")}`;
+}
+
+function formatFaltamLine(faltamP, faltamS) {
+  return `📌 Hoje faltam pra meta: PAPEL **${faltamP}** | SEMENTES **${faltamS}**`;
+}
+
+function formatAtrasadoTotalLine(papelDebt, sementesDebt) {
+  const total = Math.max(0, Number(papelDebt || 0)) + Math.max(0, Number(sementesDebt || 0));
+  return `📦 Atrasado total acumulado: **${total}**`;
+}
+
+async function getTotaisDia(guildId, userId, diaStr) {
+  const { rows } = await pool.query(
+    `
+    SELECT
+      COALESCE(SUM(CASE WHEN status='APROVADO' AND tipo='papel' THEN COALESCE(aplicado,0) ELSE 0 END),0)::int AS papel_total,
+      COALESCE(SUM(CASE WHEN status='APROVADO' AND tipo='sementes' THEN COALESCE(aplicado,0) ELSE 0 END),0)::int AS sementes_total
+    FROM historico
+    WHERE "guildId"=$1 AND "userId"=$2 AND dia=$3
+  `,
+    [guildId, userId, diaStr]
+  );
+
+  return {
+    papel: rows[0]?.papel_total ?? 0,
+    sementes: rows[0]?.sementes_total ?? 0,
+  };
+}
+
+async function applyFarm(guildId, userId, tipo, quantidade) {
+  const u0 = await rollToToday(guildId, userId);
 
   let papelHoje = Number(u0.papelHoje || 0);
   let sementesHoje = Number(u0.sementesHoje || 0);
   let papelCarry = Number(u0.papelCarry || 0);
   let sementesCarry = Number(u0.sementesCarry || 0);
+  let papelDebt = Number(u0.papelDebt || 0);
+  let sementesDebt = Number(u0.sementesDebt || 0);
 
   let aplicado = 0;
   let carry = 0;
+  let quitouDebt = 0;
 
   if (tipo === "papel") {
     const restante = Math.max(0, 100 - papelHoje);
     aplicado = Math.min(quantidade, restante);
-    carry = Math.max(0, quantidade - aplicado);
+
+    let overflow = Math.max(0, quantidade - aplicado);
+
+    const paga = Math.min(overflow, papelDebt);
+    papelDebt -= paga;
+    overflow -= paga;
+    quitouDebt = paga;
+
+    carry = overflow;
 
     papelHoje += aplicado;
     papelCarry += carry;
 
-    await pool.query(`UPDATE usuarios SET "papelHoje"=$1, "papelCarry"=$2 WHERE id=$3`, [
-      papelHoje,
-      papelCarry,
-      userId,
-    ]);
+    await pool.query(
+      `UPDATE usuarios SET "papelHoje"=$1,"papelCarry"=$2,"papelDebt"=$3 WHERE "guildId"=$4 AND "userId"=$5`,
+      [papelHoje, papelCarry, papelDebt, guildId, userId]
+    );
   } else if (tipo === "sementes") {
     const restante = Math.max(0, 100 - sementesHoje);
     aplicado = Math.min(quantidade, restante);
-    carry = Math.max(0, quantidade - aplicado);
+
+    let overflow = Math.max(0, quantidade - aplicado);
+
+    const paga = Math.min(overflow, sementesDebt);
+    sementesDebt -= paga;
+    overflow -= paga;
+    quitouDebt = paga;
+
+    carry = overflow;
 
     sementesHoje += aplicado;
     sementesCarry += carry;
 
-    await pool.query(`UPDATE usuarios SET "sementesHoje"=$1, "sementesCarry"=$2 WHERE id=$3`, [
-      sementesHoje,
-      sementesCarry,
-      userId,
-    ]);
+    await pool.query(
+      `UPDATE usuarios SET "sementesHoje"=$1,"sementesCarry"=$2,"sementesDebt"=$3 WHERE "guildId"=$4 AND "userId"=$5`,
+      [sementesHoje, sementesCarry, sementesDebt, guildId, userId]
+    );
   } else {
     throw new Error("tipo inválido");
   }
 
-  const u1 = await pool.query(`SELECT * FROM usuarios WHERE id = $1`, [userId]);
-  return { user: u1.rows[0], aplicado, carry };
+  const u1 = await pool.query(`SELECT * FROM usuarios WHERE "guildId"=$1 AND "userId"=$2`, [guildId, userId]);
+  return { user: u1.rows[0], aplicado, carry, quitouDebt };
 }
 
 // ==========================
-// 📊 RANKING APROVAÇÕES (Gerente/00) - mantém
+// ✅ FECHAMENTO DIÁRIO
 // ==========================
-async function getRankingAprovacoesDia(diaStr) {
-  const { rows } = await pool.query(
-    `
-    SELECT "gerenteId",
-           COUNT(*)::int AS aprovacoes,
-           COALESCE(SUM(COALESCE(aplicado,0)),0)::int AS aplicado_total,
-           COALESCE(SUM(COALESCE(carry,0)),0)::int AS extra_total
-    FROM historico
-    WHERE status = 'APROVADO'
-      AND "gerenteId" IS NOT NULL
-      AND dia = $1
-    GROUP BY "gerenteId"
-    ORDER BY aprovacoes DESC, aplicado_total DESC
-    LIMIT 10
-  `,
-    [diaStr]
+async function getConfig(chave, defaultValue = null) {
+  const { rows } = await pool.query(`SELECT valor FROM bot_config WHERE chave=$1`, [chave]);
+  return rows[0]?.valor ?? defaultValue;
+}
+async function setConfig(chave, valor) {
+  await pool.query(
+    `INSERT INTO bot_config (chave, valor) VALUES ($1,$2)
+     ON CONFLICT (chave) DO UPDATE SET valor=EXCLUDED.valor`,
+    [chave, String(valor)]
   );
-  return rows;
 }
 
-async function getRankingAprovacoesSemana() {
-  const { rows } = await pool.query(
-    `
-    SELECT "gerenteId",
-           COUNT(*)::int AS aprovacoes,
-           COALESCE(SUM(COALESCE(aplicado,0)),0)::int AS aplicado_total,
-           COALESCE(SUM(COALESCE(carry,0)),0)::int AS extra_total
-    FROM historico
-    WHERE status = 'APROVADO'
-      AND "gerenteId" IS NOT NULL
-      AND created_at >= NOW() - INTERVAL '7 days'
-    GROUP BY "gerenteId"
-    ORDER BY aprovacoes DESC, aplicado_total DESC
-    LIMIT 10
-  `
-  );
-  return rows;
+function chunkLines(lines, maxLen = 3500) {
+  const chunks = [];
+  let cur = "";
+  for (const line of lines) {
+    if ((cur + "\n" + line).length > maxLen) {
+      chunks.push(cur);
+      cur = line;
+    } else {
+      cur = cur ? cur + "\n" + line : line;
+    }
+  }
+  if (cur) chunks.push(cur);
+  return chunks;
 }
 
-function formatRankingAprov(rows) {
-  if (!rows || rows.length === 0) return "Nenhuma aprovação encontrada.";
-  return rows
-    .map((r, i) => {
-      const user = `<@${r.gerenteId}>`;
-      return `**${i + 1}.** ${user} — ✅ ${r.aprovacoes} | aplicado **${r.aplicado_total}** | extra **${r.extra_total}**`;
-    })
-    .join("\n");
+async function runDailyAuditOnce() {
+  const now = new Date();
+  const hh = now.getHours();
+  const mm = now.getMinutes();
+  if (!(hh === DAILY_AUDIT_HOUR && mm === DAILY_AUDIT_MIN)) return;
+
+  const today = todayKey();
+  const diaAuditado = yesterdayKey();
+
+  for (const guild of client.guilds.cache.values()) {
+    const cfg = getCfg(guild.id);
+    if (!cfg) continue;
+
+    const lastDoneKey = `${guild.id}:last_daily_audit_day`;
+    const lastDone = await getConfig(lastDoneKey, "");
+    if (lastDone === today) continue;
+
+    const { rows: users } = await pool.query(`SELECT "userId" FROM usuarios WHERE "guildId"=$1`, [guild.id]);
+    const faltaram = [];
+
+    for (const u of users) {
+      const userId = u.userId;
+      const totals = await getTotaisDia(guild.id, userId, diaAuditado);
+
+      const faltouP = Math.max(0, META_DIARIA - totals.papel);
+      const faltouS = Math.max(0, META_DIARIA - totals.sementes);
+
+      if (faltouP > 0 || faltouS > 0) {
+        await pool.query(
+          `UPDATE usuarios
+           SET "papelDebt" = COALESCE("papelDebt",0) + $1,
+               "sementesDebt" = COALESCE("sementesDebt",0) + $2
+           WHERE "guildId"=$3 AND "userId"=$4`,
+          [faltouP, faltouS, guild.id, userId]
+        );
+
+        faltaram.push({ userId, papel_total: totals.papel, sementes_total: totals.sementes, faltouP, faltouS });
+      }
+    }
+
+    const logChannel = getLogChannel(guild);
+    if (!logChannel) continue;
+
+    const thumb = getThumb(client);
+
+    if (!faltaram.length) {
+      const embed = new EmbedBuilder()
+        .setColor("#2b2d31")
+        .setTitle(`✅ Fechamento diário (META) — ${cfg.NAME}`)
+        .setDescription(`📅 Dia auditado: **${diaAuditado}**\n\n✅ Ninguém ficou abaixo da meta (${META_DIARIA}).`)
+        .setTimestamp();
+      if (thumb) embed.setThumbnail(thumb);
+      await logChannel.send({ embeds: [embed] }).catch(() => null);
+    } else {
+      const lines = faltaram.map((r) => {
+        const pTxt = r.faltouP > 0 ? `❌ ${r.papel_total}/${META_DIARIA} (faltou ${r.faltouP})` : `✅ ${r.papel_total}/${META_DIARIA}`;
+        const sTxt = r.faltouS > 0 ? `❌ ${r.sementes_total}/${META_DIARIA} (faltou ${r.faltouS})` : `✅ ${r.sementes_total}/${META_DIARIA}`;
+        return `• <@${r.userId}> — 📄 ${pTxt} | 🌱 ${sTxt}`;
+      });
+
+      const chunks = chunkLines(lines);
+
+      for (let i = 0; i < chunks.length; i++) {
+        const embed = new EmbedBuilder()
+          .setColor("#2b2d31")
+          .setTitle(`⚠️ Fechamento diário: NÃO bateu meta — ${cfg.NAME}`)
+          .setDescription(
+            `📅 Dia auditado: **${diaAuditado}**\n🎯 Meta diária: **${META_DIARIA}**\n📌 A diferença foi somada no **Farme atrasado**.\n\n${chunks[i]}`
+          )
+          .setFooter({ text: i === 0 ? "Meta obrigatória: abaixo da meta vira dívida acumulada." : `Continuação (${i + 1}/${chunks.length})` })
+          .setTimestamp();
+        if (thumb) embed.setThumbnail(thumb);
+        await logChannel.send({ embeds: [embed] }).catch(() => null);
+      }
+    }
+
+    await setConfig(lastDoneKey, today);
+  }
+}
+
+async function startDailyAuditLoop() {
+  setInterval(() => {
+    runDailyAuditOnce().catch((e) => console.error("Erro runDailyAuditOnce:", e));
+  }, 30_000);
 }
 
 // ==========================
@@ -355,26 +522,78 @@ client.on("messageCreate", async (message) => {
   try {
     if (!message.guild || message.author.bot) return;
 
-    console.log("[MSG]", message.channel.id, message.author.tag, JSON.stringify(message.content));
+    const cfg = getCfg(message.guild.id);
+    if (!cfg) return;
 
-    const member = await message.guild.members.fetch(message.author.id);
-    const isGerente = member.roles.cache.has(GERENTE_ROLE_ID);
-    const is00 = member.roles.cache.has(ROLE_00_ID);
+    console.log(
+      "[MSG]",
+      "guild:", message.guild.id,
+      "channel:", message.channel.id,
+      "parent:", message.channel.parentId || null,
+      "author:", message.author.tag,
+      "attachments:", message.attachments?.size || 0,
+      "content:", JSON.stringify(message.content)
+    );
+
+    const member = await message.guild.members.fetch(message.author.id).catch(() => null);
+    if (!member) return;
+
+    const isGerente = member.roles.cache.has(cfg.GERENTE_ROLE_ID);
+    const is00 = member.roles.cache.has(cfg.ROLE_00_ID);
 
     const content = (message.content || "").trim();
     const lower = content.toLowerCase();
 
-    // ======================
-    // ✅ STATUS (INDIVIDUAL) - QUALQUER UM
-    // ======================
+    // ✅ DEBUG ENVIO
+    if (lower === "!debugenvio") {
+      const ok = isEnvioChannel(message);
+      const lines = [
+        `🏷️ Servidor: **${cfg.NAME}**`,
+        `🧾 guildId: \`${message.guild.id}\``,
+        `#️⃣ channelId: \`${message.channel.id}\``,
+        `🧩 parentId (categoria): \`${message.channel.parentId || "null"}\``,
+        `✅ ENVIO_FARME_CHANNEL_ID (config): \`${cfg.ENVIO_FARME_CHANNEL_ID}\``,
+        `✅ ENVIO_FARME_CATEGORY_ID (config): \`${cfg.ENVIO_FARME_CATEGORY_ID || "null"}\``,
+        `📌 isEnvioChannel() => **${ok}**`,
+        `📎 attachments.size => **${message.attachments?.size || 0}**`,
+      ];
+      return message.reply(lines.join("\n"));
+    }
+
+    // ✅ DEBUG ROLES
+    if (lower === "!debugroles") {
+      const roles = member.roles.cache.map(r => `${r.name}(${r.id})`).slice(0, 50);
+      return message.reply(
+        `🏷️ Servidor: **${cfg.NAME}**\n` +
+        `👤 Você: <@${member.id}>\n` +
+        `👑 isGerente => **${isGerente}**\n` +
+        `🟦 is00 => **${is00}**\n` +
+        `🎭 Seus cargos (até 50):\n` +
+        roles.map(x => `• ${x}`).join("\n")
+      );
+    }
+
+    // ✅ STATUS
     if (lower === "!status") {
-      const u = await rollToToday(message.author.id);
+      const u = await rollToToday(message.guild.id, message.author.id);
+
+      const totalsHoje = await getTotaisDia(message.guild.id, message.author.id, todayKey());
+      const faltamP = Math.max(0, META_DIARIA - (totalsHoje.papel || 0));
+      const faltamS = Math.max(0, META_DIARIA - (totalsHoje.sementes || 0));
+
+      const papelDebt = Number(u.papelDebt || 0);
+      const sementesDebt = Number(u.sementesDebt || 0);
+      const debtLine = formatDebtLine(papelDebt, sementesDebt);
 
       const txt =
+        `🏷️ Servidor: **${cfg.NAME}**\n` +
         `👤 ${message.author}\n\n` +
         `📄 **Papel:** ${u.papelHoje}/100 (extra: ${u.papelCarry})\n` +
         `🌱 **Sementes:** ${u.sementesHoje}/100 (extra: ${u.sementesCarry})\n\n` +
-        `🕒 Dia: **${u.ultimoDia}**`;
+        `${formatFaltamLine(faltamP, faltamS)}\n` +
+        `${formatAtrasadoTotalLine(papelDebt, sementesDebt)}\n` +
+        (debtLine ? `${debtLine}\n` : "✅ Farme atrasado: 0\n") +
+        `\n🕒 Dia: **${u.ultimoDia}**`;
 
       const embed = new EmbedBuilder()
         .setColor("#2b2d31")
@@ -389,67 +608,18 @@ client.on("messageCreate", async (message) => {
       return message.reply({ embeds: [embed] });
     }
 
-    // ======================
-    // 🎛 PAINEL (mantém, se quiser remover depois)
-    // ======================
-    if (lower === "!painel") {
-      const u = await rollToToday(message.author.id);
-
-      const txt =
-        `👤 ${message.author}\n\n` +
-        `📄 **Papel:** ${u.papelHoje}/100 (extra: ${u.papelCarry})\n` +
-        `🌱 **Sementes:** ${u.sementesHoje}/100 (extra: ${u.sementesCarry})\n\n` +
-        `🕒 Dia: **${u.ultimoDia}**\n` +
-        `✅ Use \`!farme papel 10\` ou \`!farme sementes 10\` no canal de envio.`;
-
-      try {
-        const embed = new EmbedBuilder()
-          .setColor("#2b2d31")
-          .setTitle("📌 Painel do Farme")
-          .setDescription(txt)
-          .setFooter({ text: is00 ? "Você é 00 (tem !editar)" : isGerente ? "Você é Gerente" : "Membro" })
-          .setTimestamp();
-
-        const thumb = getThumb(client);
-        if (thumb) embed.setThumbnail(thumb);
-
-        return message.reply({ embeds: [embed] });
-      } catch (e) {
-        console.error("Falha ao enviar embed do painel:", e);
-        return message.reply({ content: `📌 **Painel do Farme**\n\n${txt}` });
-      }
-    }
-
-    // ======================
-    // 📊 RANKING APROVAÇÕES (Gerente/00) - mantém
-    // ======================
-    if (lower === "!rankaprov" || lower === "!rankingaprov" || lower === "!rankingaprovacoes") {
-      if (!isGerente && !is00) return message.reply("❌ Apenas **Gerente/00** pode usar.");
-
-      const hoje = todayKey();
-      const [rDia, rSemana] = await Promise.all([getRankingAprovacoesDia(hoje), getRankingAprovacoesSemana()]);
-
-      const embed = new EmbedBuilder()
-        .setColor("#2b2d31")
-        .setTitle("🏆 Ranking de Aprovações (Gerentes/00)")
-        .addFields(
-          { name: `📅 Hoje (${hoje})`, value: formatRankingAprov(rDia) },
-          { name: "🗓️ Últimos 7 dias", value: formatRankingAprov(rSemana) }
-        )
-        .setFooter({ text: "Comando: !rankaprov" })
-        .setTimestamp();
-
-      const thumb = getThumb(client);
-      if (thumb) embed.setThumbnail(thumb);
-
-      return message.reply({ embeds: [embed] });
-    }
-
-    // ======================
     // 🔥 FARME
-    // ======================
     if (lower.startsWith("!farme")) {
-      if (!isEnvioChannel(message)) return;
+      // agora explica o motivo ao invés de "sumir"
+      if (!isEnvioChannel(message)) {
+        return message.reply(
+          `❌ Use o comando no canal certo.\n` +
+          `📌 Este canal: <#${message.channel.id}>\n` +
+          `✅ Canal permitido (config): <#${cfg.ENVIO_FARME_CHANNEL_ID}>\n` +
+          (cfg.ENVIO_FARME_CATEGORY_ID ? `✅ Categoria permitida: \`${cfg.ENVIO_FARME_CATEGORY_ID}\`\n` : "") +
+          `Dica: manda \`!debugenvio\` aqui que eu te digo exatamente o ID que o bot tá vendo.`
+        );
+      }
 
       const args = content.split(/\s+/);
       const tipo = (args[1] || "").toLowerCase();
@@ -461,8 +631,13 @@ client.on("messageCreate", async (message) => {
       if (isNaN(quantidade) || quantidade <= 0) {
         return message.reply("❌ Quantidade inválida. Ex: `!farme sementes 25`");
       }
+
+      // ⚠️ importante: isso só conta arquivo anexado (upload).
       if (!message.attachments.size) {
-        return message.reply("❌ Envie o print junto.");
+        return message.reply(
+          "❌ Envie o print **anexado** na mesma mensagem do comando.\n" +
+          "Se o print estiver vindo como **embed** (não arquivo), o Discord não conta como attachment."
+        );
       }
 
       const row = new ActionRowBuilder().addComponents(
@@ -485,11 +660,7 @@ client.on("messageCreate", async (message) => {
       });
     }
 
-    // ======================
-    // ✏️ EDITAR (SÓ 00) + LOGS (ANTES/DEPOIS)
-    // !editar @user papel +50
-    // !editar @user sementes -10
-    // ======================
+    // ✏️ EDITAR (SÓ 00)
     if (lower.startsWith("!editar")) {
       if (!is00) return message.reply("❌ Apenas cargo **00** pode usar.");
 
@@ -498,25 +669,42 @@ client.on("messageCreate", async (message) => {
       const tipo = (parts[2] || "").toLowerCase();
       const valor = parseInt(parts[3], 10);
 
-      if (!user || !["papel", "sementes"].includes(tipo) || isNaN(valor)) {
-        return message.reply("Use: `!editar @usuario papel +50` ou `!editar @usuario sementes -10`");
+      if (!user || isNaN(valor)) {
+        return message.reply(
+          "Use:\n" +
+            "`!editar @usuario papel +50`\n" +
+            "`!editar @usuario sementes -10`\n" +
+            "`!editar @usuario extra_papel +30`\n" +
+            "`!editar @usuario extra_sementes -20`"
+        );
       }
       if (user.id === message.author.id) {
         return message.reply("❌ Você não pode editar o próprio farme.");
       }
 
       const logChannel = getLogChannel(message.guild);
+      const before = await rollToToday(message.guild.id, user.id);
 
-      // pega antes
-      const before = await rollToToday(user.id);
+      const sendEditLog = async (titulo, desc) => {
+        if (!logChannel) return;
+        const embed = new EmbedBuilder().setColor("#2b2d31").setTitle(titulo).setDescription(desc).setTimestamp();
+        const thumb = getThumb(client);
+        if (thumb) embed.setThumbnail(thumb);
+        logChannel.send({ embeds: [embed] }).catch(() => null);
+      };
 
       if (tipo === "papel") {
         const antes = Number(before.papelHoje || 0);
         const depois = Math.max(0, antes + valor);
 
-        await pool.query(`UPDATE usuarios SET "papelHoje"=$1 WHERE id=$2`, [depois, user.id]);
+        await pool.query(`UPDATE usuarios SET "papelHoje"=$1 WHERE "guildId"=$2 AND "userId"=$3`, [
+          depois,
+          message.guild.id,
+          user.id,
+        ]);
 
         await insertHistorico({
+          guildId: message.guild.id,
           userId: user.id,
           tipo: "papel",
           quantidade: valor,
@@ -528,26 +716,10 @@ client.on("messageCreate", async (message) => {
           dia: todayKey(),
         });
 
-        // log
-        if (logChannel) {
-          const embed = new EmbedBuilder()
-            .setColor("#2b2d31")
-            .setTitle("🛠️ AJUSTE MANUAL (00)")
-            .setDescription(
-              `👤 Membro: <@${user.id}>\n` +
-              `🧾 Tipo: **PAPEL**\n` +
-              `✏️ Ajuste: **${valor >= 0 ? "+" : ""}${valor}**\n` +
-              `📌 Antes: **${antes}** → Depois: **${depois}**\n` +
-              `🛡️ Feito por: <@${message.author.id}>\n` +
-              `🕒 ${nowBR()}`
-            )
-            .setTimestamp();
-
-          const thumb = getThumb(client);
-          if (thumb) embed.setThumbnail(thumb);
-
-          logChannel.send({ embeds: [embed] }).catch(() => null);
-        }
+        await sendEditLog(
+          `🛠️ AJUSTE MANUAL (00) — ${cfg.NAME}`,
+          `👤 Membro: <@${user.id}>\n🧾 Tipo: **PAPEL**\n✏️ Ajuste: **${valor >= 0 ? "+" : ""}${valor}**\n📌 Antes: **${antes}** → Depois: **${depois}**\n🛡️ Feito por: <@${message.author.id}>`
+        );
 
         return message.reply(`✅ Papel atualizado: <@${user.id}> **${depois}/100**`);
       }
@@ -556,9 +728,14 @@ client.on("messageCreate", async (message) => {
         const antes = Number(before.sementesHoje || 0);
         const depois = Math.max(0, antes + valor);
 
-        await pool.query(`UPDATE usuarios SET "sementesHoje"=$1 WHERE id=$2`, [depois, user.id]);
+        await pool.query(`UPDATE usuarios SET "sementesHoje"=$1 WHERE "guildId"=$2 AND "userId"=$3`, [
+          depois,
+          message.guild.id,
+          user.id,
+        ]);
 
         await insertHistorico({
+          guildId: message.guild.id,
           userId: user.id,
           tipo: "sementes",
           quantidade: valor,
@@ -570,29 +747,51 @@ client.on("messageCreate", async (message) => {
           dia: todayKey(),
         });
 
-        // log
-        if (logChannel) {
-          const embed = new EmbedBuilder()
-            .setColor("#2b2d31")
-            .setTitle("🛠️ AJUSTE MANUAL (00)")
-            .setDescription(
-              `👤 Membro: <@${user.id}>\n` +
-              `🧾 Tipo: **SEMENTES**\n` +
-              `✏️ Ajuste: **${valor >= 0 ? "+" : ""}${valor}**\n` +
-              `📌 Antes: **${antes}** → Depois: **${depois}**\n` +
-              `🛡️ Feito por: <@${message.author.id}>\n` +
-              `🕒 ${nowBR()}`
-            )
-            .setTimestamp();
-
-          const thumb = getThumb(client);
-          if (thumb) embed.setThumbnail(thumb);
-
-          logChannel.send({ embeds: [embed] }).catch(() => null);
-        }
+        await sendEditLog(
+          `🛠️ AJUSTE MANUAL (00) — ${cfg.NAME}`,
+          `👤 Membro: <@${user.id}>\n🧾 Tipo: **SEMENTES**\n✏️ Ajuste: **${valor >= 0 ? "+" : ""}${valor}**\n📌 Antes: **${antes}** → Depois: **${depois}**\n🛡️ Feito por: <@${message.author.id}>`
+        );
 
         return message.reply(`✅ Sementes atualizado: <@${user.id}> **${depois}/100**`);
       }
+
+      if (tipo === "extra_papel") {
+        const antes = Number(before.papelCarry || 0);
+        const depois = Math.max(0, antes + valor);
+
+        await pool.query(`UPDATE usuarios SET "papelCarry"=$1 WHERE "guildId"=$2 AND "userId"=$3`, [
+          depois,
+          message.guild.id,
+          user.id,
+        ]);
+
+        await sendEditLog(
+          `🛠️ AJUSTE MANUAL (00) — ${cfg.NAME}`,
+          `👤 Membro: <@${user.id}>\n🧾 Tipo: **EXTRA PAPEL**\n✏️ Ajuste: **${valor >= 0 ? "+" : ""}${valor}**\n📌 Antes: **${antes}** → Depois: **${depois}**\n🛡️ Feito por: <@${message.author.id}>`
+        );
+
+        return message.reply(`✅ Extra (papel) atualizado: <@${user.id}> **${depois}**`);
+      }
+
+      if (tipo === "extra_sementes") {
+        const antes = Number(before.sementesCarry || 0);
+        const depois = Math.max(0, antes + valor);
+
+        await pool.query(`UPDATE usuarios SET "sementesCarry"=$1 WHERE "guildId"=$2 AND "userId"=$3`, [
+          depois,
+          message.guild.id,
+          user.id,
+        ]);
+
+        await sendEditLog(
+          `🛠️ AJUSTE MANUAL (00) — ${cfg.NAME}`,
+          `👤 Membro: <@${user.id}>\n🧾 Tipo: **EXTRA SEMENTES**\n✏️ Ajuste: **${valor >= 0 ? "+" : ""}${valor}**\n📌 Antes: **${antes}** → Depois: **${depois}**\n🛡️ Feito por: <@${message.author.id}>`
+        );
+
+        return message.reply(`✅ Extra (sementes) atualizado: <@${user.id}> **${depois}**`);
+      }
+
+      return message.reply("Tipo inválido.\nUse: `papel`, `sementes`, `extra_papel`, `extra_sementes`");
     }
 
     void isGerente;
@@ -609,9 +808,12 @@ client.on("interactionCreate", async (interaction) => {
   try {
     if (!interaction.isButton() || !interaction.guild) return;
 
+    const cfg = getCfg(interaction.guild.id);
+    if (!cfg) return;
+
     const member = await interaction.guild.members.fetch(interaction.user.id);
-    const isGerente = member.roles.cache.has(GERENTE_ROLE_ID);
-    const is00 = member.roles.cache.has(ROLE_00_ID);
+    const isGerente = member.roles.cache.has(cfg.GERENTE_ROLE_ID);
+    const is00 = member.roles.cache.has(cfg.ROLE_00_ID);
 
     if (!isGerente && !is00) {
       return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
@@ -625,7 +827,7 @@ client.on("interactionCreate", async (interaction) => {
 
     await interaction.deferUpdate();
 
-    if (await alreadyProcessed(msgId)) {
+    if (await alreadyProcessed(interaction.guild.id, msgId)) {
       return interaction.followUp({ content: "⚠️ Esse farme já foi processado.", ephemeral: true });
     }
 
@@ -635,27 +837,20 @@ client.on("interactionCreate", async (interaction) => {
 
     const sendLogEmbed = async (title, description) => {
       if (!logChannel) return;
-      const embed = new EmbedBuilder()
-        .setColor("#2b2d31")
-        .setTitle(title)
-        .setDescription(description)
-        .setTimestamp();
-
+      const embed = new EmbedBuilder().setColor("#2b2d31").setTitle(title).setDescription(description).setTimestamp();
       const thumb = getThumb(interaction);
       if (thumb) embed.setThumbnail(thumb);
 
-      try {
-        await logChannel.send({ embeds: [embed] });
-      } catch {
-        await logChannel.send(description).catch(() => null);
-      }
+      try { await logChannel.send({ embeds: [embed] }); }
+      catch { await logChannel.send(description).catch(() => null); }
     };
 
     if (acao === "aprovar") {
-      const result = await applyFarm(userId, tipo, quantidade);
+      const result = await applyFarm(interaction.guild.id, userId, tipo, quantidade);
       const u = result.user;
 
       await insertHistorico({
+        guildId: interaction.guild.id,
         userId,
         tipo,
         quantidade,
@@ -677,12 +872,15 @@ client.on("interactionCreate", async (interaction) => {
         components: [],
       });
 
+      const debtLine = formatDebtLine(Number(u.papelDebt || 0), Number(u.sementesDebt || 0));
+
       await sendLogEmbed(
-        "✅ FARME APROVADO",
+        `✅ FARME APROVADO — ${cfg.NAME}`,
         `👤 Usuário: <@${userId}>\n` +
           `🧾 Tipo: **${tipo.toUpperCase()}**\n` +
           `📦 Quantidade: **${quantidade}**\n` +
           `➡️ Aplicado: **${result.aplicado}** | Extra: **${result.carry}**\n` +
+          (debtLine ? `${debtLine}\n` : "") +
           `🛡️ Aprovado por: <@${interaction.user.id}>`
       );
 
@@ -691,6 +889,7 @@ client.on("interactionCreate", async (interaction) => {
 
     if (acao === "negar") {
       await insertHistorico({
+        guildId: interaction.guild.id,
         userId,
         tipo,
         quantidade,
@@ -708,7 +907,7 @@ client.on("interactionCreate", async (interaction) => {
       });
 
       await sendLogEmbed(
-        "❌ FARME NEGADO",
+        `❌ FARME NEGADO — ${cfg.NAME}`,
         `👤 Usuário: <@${userId}>\n` +
           `🧾 Tipo: **${tipo.toUpperCase()}**\n` +
           `📦 Quantidade: **${quantidade}**\n` +
