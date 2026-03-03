@@ -1,3 +1,10 @@
+// ✅✅✅ ARQUIVO COMPLETO (com !ajustar + LOG antes/depois + !historico @membro) ✅✅✅
+// OBS: Eu mantive TODO seu código e só acrescentei/ajustei o que faltava.
+// É só substituir o seu arquivo por este.
+
+// ==========================
+// IMPORTS
+// ==========================
 const {
   Client,
   GatewayIntentBits,
@@ -9,7 +16,7 @@ const {
 } = require("discord.js");
 
 console.log(
-  "🔥 BUILD FINAL (FIX usuarios.id MIGRATION + !tabela + !relatorio + !naofarmou + !editar(reply) + !desfazer(reply) + !ajustar(00) + !ajuda por cargo + DM 00:05) 🔥",
+  "🔥 BUILD FINAL (FIX usuarios.id MIGRATION + !tabela + !relatorio + !naofarmou + !editar(reply) + !desfazer(reply) + !ajustar(00) + !historico + !ajuda por cargo + DM 00:05) 🔥",
   new Date().toISOString()
 );
 
@@ -132,6 +139,8 @@ async function ensureHistoricoIndexes() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_dia ON historico ("dia");`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_created_at ON historico (created_at);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_guild_user_dia ON historico ("guildId","userId","dia");`);
+  // ✅ novo: melhora o !historico
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_guild_user_created ON historico ("guildId","userId",created_at DESC);`);
 }
 
 // ==========================
@@ -705,8 +714,7 @@ async function applyAdjustDirect(guildId, userId, tipo, delta) {
       const takeHoje = Math.min(remove, papelHoje);
       papelHoje -= takeHoje;
       remove -= takeHoje;
-
-      // não mexe no debt aqui (ajuste administrativo)
+      // ✅ não mexe em debt no ajuste manual
     }
 
     await pool.query(
@@ -741,6 +749,34 @@ async function applyAdjustDirect(guildId, userId, tipo, delta) {
 
   const { rows } = await pool.query(`SELECT * FROM usuarios WHERE "guildId"=$1 AND "userId"=$2`, [guildId, userId]);
   return { before: u0, after: rows[0] || u0 };
+}
+
+// ==========================
+// ✅ HISTÓRICO (para comando !historico)
+// ==========================
+function statusEmoji(status) {
+  const s = String(status || "").toUpperCase();
+  if (s === "APROVADO") return "✅";
+  if (s === "NEGADO") return "❌";
+  if (s === "AJUSTE") return "👑";
+  if (s === "EDITADO") return "✏️";
+  if (s === "DESFEITO") return "🔁";
+  return "📌";
+}
+
+async function getHistoricoUser(guildId, userId, limit = 30) {
+  const lim = Math.max(1, Math.min(100, Number(limit || 30)));
+  const { rows } = await pool.query(
+    `
+    SELECT tipo, quantidade, status, data, dia, "msgId", "gerenteId", aplicado, carry, created_at
+    FROM historico
+    WHERE "guildId"=$1 AND "userId"=$2
+    ORDER BY created_at DESC, id DESC
+    LIMIT ${lim}
+    `,
+    [guildId, userId]
+  );
+  return rows;
 }
 
 // ==========================
@@ -917,20 +953,18 @@ client.on("messageCreate", async (message) => {
     if (lower === "!ajuda") {
       let desc = "";
 
-      // base (todos)
       desc += `👤 **Membro**\n`;
       desc += `\`!status\` — ver seu status do dia\n`;
       desc += `\`!farme papel X\` / \`!farme sementes X\` — enviar farme com print (no canal correto)\n`;
 
-      // gerente/00
       if (isGerente || is00) {
         desc += `\n🛡️ **Gerente / 00**\n`;
         desc += `\`!tabela\` / \`!tabela ontem\` — ranking de aprovados\n`;
         desc += `\`!relatorio\` — relatório geral do dia\n`;
         desc += `\`!naofarmou\` / \`!naofarmou @cargo\` — lista quem não teve farme aprovado\n`;
+        desc += `\`!historico @membro\` — histórico do membro (últimos registros)\n`;
       }
 
-      // 00
       if (is00) {
         desc += `\n👑 **Somente 00**\n`;
         desc += `*(reply na mensagem aprovada do bot)*\n`;
@@ -956,6 +990,54 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================
+    // 🧾 !historico (gerente/00)
+    // Uso: !historico @membro
+    //      !historico @membro 50
+    // ==========================
+    if (lower.startsWith("!historico")) {
+      if (!isGerente && !is00) return message.reply("❌ Sem permissão.");
+
+      const target = message.mentions.users.first();
+      if (!target) return message.reply("⚠️ Use: `!historico @membro` (opcional: `!historico @membro 50`)");
+
+      const parts = content.split(/\s+/);
+      const limit = parseInt(parts[2] || "30", 10);
+      const rows = await getHistoricoUser(message.guild.id, target.id, isNaN(limit) ? 30 : limit);
+
+      if (!rows.length) {
+        return message.reply(`📌 Não achei histórico para <@${target.id}> ainda.`);
+      }
+
+      const lines = rows.map((r, i) => {
+        const emo = statusEmoji(r.status);
+        const tipo = (r.tipo || "").toUpperCase();
+        const q = Number(r.quantidade ?? 0);
+        const aplicado = r.aplicado == null ? "-" : Number(r.aplicado);
+        const carry = r.carry == null ? "-" : Number(r.carry);
+        const staff = r.gerenteId ? `<@${r.gerenteId}>` : "-";
+        const dia = r.dia || "-";
+        return `${i + 1}. ${emo} **${r.status}** • **${tipo}** • q=${q} • aplicado=${aplicado} • extra=${carry} • dia=${dia} • por=${staff}`;
+      });
+
+      const chunks = chunkTextLines(lines, 3800);
+      const thumb = getThumb(client);
+
+      for (let idx = 0; idx < chunks.length; idx++) {
+        const embed = new EmbedBuilder()
+          .setColor("#2b2d31")
+          .setTitle(`🧾 Histórico — ${cfg.NAME}`)
+          .setDescription(`👤 Usuário: <@${target.id}>\n\n${chunks[idx]}`)
+          .setTimestamp();
+
+        if (thumb) embed.setThumbnail(thumb);
+
+        if (idx === 0) await message.reply({ embeds: [embed] });
+        else await message.channel.send({ embeds: [embed] });
+      }
+      return;
+    }
+
+    // ==========================
     // 👑 !ajustar (SÓ 00) — sem reply
     // ==========================
     if (lower.startsWith("!ajustar")) {
@@ -967,14 +1049,12 @@ client.on("messageCreate", async (message) => {
       }
 
       const parts = content.split(/\s+/);
-      // parts[0]=!ajustar, parts[1]=@membro, parts[2]=tipo, parts[3]=delta
       const tipo = (parts[2] || "").toLowerCase();
       const deltaStr = parts[3] || "";
 
       if (!["papel", "sementes"].includes(tipo)) {
         return message.reply("❌ Tipo inválido. Use `papel` ou `sementes`.\nEx: `!ajustar @membro papel +80`");
       }
-
       if (!deltaStr) {
         return message.reply("❌ Falta o valor. Ex: `!ajustar @membro papel -120`");
       }
@@ -988,20 +1068,42 @@ client.on("messageCreate", async (message) => {
 
       const { before, after } = await applyAdjustDirect(message.guild.id, target.id, tipo, delta);
 
-      const beforeHoje = tipo === "papel" ? Number(before.papelHoje || 0) : Number(before.sementesHoje || 0);
-      const beforeCarry = tipo === "papel" ? Number(before.papelCarry || 0) : Number(before.sementesCarry || 0);
-      const afterHoje = tipo === "papel" ? Number(after.papelHoje || 0) : Number(after.sementesHoje || 0);
-      const afterCarry = tipo === "papel" ? Number(after.papelCarry || 0) : Number(after.sementesCarry || 0);
+      // ✅ grava no histórico (pra aparecer no !historico)
+      await insertHistorico({
+        guildId: message.guild.id,
+        userId: target.id,
+        tipo,
+        quantidade: delta,
+        status: "AJUSTE",
+        msgId: message.id,
+        gerenteId: message.author.id,
+        aplicado: null,
+        carry: null,
+        dia: todayKey(),
+      });
 
+      // dados antes/depois (os dois tipos, para log completo)
+      const bP = Number(before.papelHoje || 0), bPC = Number(before.papelCarry || 0);
+      const bS = Number(before.sementesHoje || 0), bSC = Number(before.sementesCarry || 0);
+      const aP = Number(after.papelHoje || 0), aPC = Number(after.papelCarry || 0);
+      const aS = Number(after.sementesHoje || 0), aSC = Number(after.sementesCarry || 0);
+
+      const deltaTxt = delta > 0 ? `+${delta}` : `${delta}`;
+
+      // resposta no chat
       const embed = new EmbedBuilder()
         .setColor("#2b2d31")
         .setTitle("👑 Ajuste aplicado (00)")
         .setDescription(
           `👤 Usuário: <@${target.id}>\n` +
             `🧾 Tipo: **${tipo.toUpperCase()}**\n` +
-            `🔧 Ajuste: **${delta > 0 ? `+${delta}` : `${delta}`}**\n\n` +
-            `📌 Antes: **${beforeHoje}/100** (extra: ${beforeCarry})\n` +
-            `✅ Agora: **${afterHoje}/100** (extra: ${afterCarry})\n\n` +
+            `🔧 Ajuste: **${deltaTxt}**\n\n` +
+            `🔎 **ANTES**\n` +
+            `📄 Papel: **${bP}/100** (extra: ${bPC})\n` +
+            `🌱 Sementes: **${bS}/100** (extra: ${bSC})\n\n` +
+            `✅ **DEPOIS**\n` +
+            `📄 Papel: **${aP}/100** (extra: ${aPC})\n` +
+            `🌱 Sementes: **${aS}/100** (extra: ${aSC})\n\n` +
             `🛡️ Ajustado por: <@${message.author.id}>`
         )
         .setTimestamp();
@@ -1011,20 +1113,27 @@ client.on("messageCreate", async (message) => {
 
       await message.reply({ embeds: [embed] });
 
+      // 🚨 LOG ANTES/DEPOIS (pedido)
       const logChannel = getLogChannel(message.guild);
       if (logChannel) {
         const logEmbed = new EmbedBuilder()
-          .setColor("#2b2d31")
-          .setTitle(`👑 AJUSTE (00) — ${cfg.NAME}`)
+          .setColor("#ff4d4d")
+          .setTitle(`🚨 AJUSTE MANUAL — ${cfg.NAME}`)
           .setDescription(
             `👤 Usuário: <@${target.id}>\n` +
-              `🧾 Tipo: **${tipo.toUpperCase()}**\n` +
-              `🔧 Ajuste: **${delta > 0 ? `+${delta}` : `${delta}`}**\n` +
-              `📌 Antes: ${beforeHoje}/100 (extra: ${beforeCarry})\n` +
-              `✅ Agora: ${afterHoje}/100 (extra: ${afterCarry})\n` +
+              `📦 Tipo: **${tipo.toUpperCase()}**\n\n` +
+              `🔎 **ANTES**\n` +
+              `📄 Papel: ${bP}/100 (extra: ${bPC})\n` +
+              `🌱 Sementes: ${bS}/100 (extra: ${bSC})\n\n` +
+              `✏️ **AJUSTE**\n` +
+              `${deltaTxt}\n\n` +
+              `✅ **DEPOIS**\n` +
+              `📄 Papel: ${aP}/100 (extra: ${aPC})\n` +
+              `🌱 Sementes: ${aS}/100 (extra: ${aSC})\n\n` +
               `🛡️ Por: <@${message.author.id}>`
           )
           .setTimestamp();
+
         if (thumb) logEmbed.setThumbnail(thumb);
         await logChannel.send({ embeds: [logEmbed] }).catch(() => null);
       }
@@ -1072,6 +1181,9 @@ client.on("messageCreate", async (message) => {
 
       await ensureUser(message.guild.id, h.userId);
 
+      // ✅ pega antes (para log antes/depois)
+      const beforeUser = await rollToToday(message.guild.id, h.userId);
+
       const dbClient = await pool.connect();
       try {
         await dbClient.query("BEGIN");
@@ -1086,8 +1198,23 @@ client.on("messageCreate", async (message) => {
       }
 
       const h2 = await getHistoricoAprovadoByMsgId(message.guild.id, refMsgId);
+      const afterUser = await rollToToday(message.guild.id, h.userId);
 
-      // atualiza msg aprovada do bot
+      // ✅ registra no histórico (EDITADO) para aparecer no !historico
+      await insertHistorico({
+        guildId: message.guild.id,
+        userId: h.userId,
+        tipo: h.tipo,
+        quantidade: newQty,
+        status: "EDITADO",
+        msgId: message.id,
+        gerenteId: message.author.id,
+        aplicado: h2?.aplicado ?? null,
+        carry: h2?.carry ?? null,
+        dia: todayKey(),
+      });
+
+      // tenta atualizar msg aprovada do bot
       try {
         const refMsg = await message.channel.messages.fetch(refMsgId);
         if (refMsg?.author?.id === client.user.id) {
@@ -1124,15 +1251,25 @@ client.on("messageCreate", async (message) => {
 
       const logChannel = getLogChannel(message.guild);
       if (logChannel) {
+        const bP = Number(beforeUser?.papelHoje || 0), bPC = Number(beforeUser?.papelCarry || 0);
+        const bS = Number(beforeUser?.sementesHoje || 0), bSC = Number(beforeUser?.sementesCarry || 0);
+        const aP = Number(afterUser?.papelHoje || 0), aPC = Number(afterUser?.papelCarry || 0);
+        const aS = Number(afterUser?.sementesHoje || 0), aSC = Number(afterUser?.sementesCarry || 0);
+
         const logEmbed = new EmbedBuilder()
-          .setColor("#2b2d31")
-          .setTitle(`✏️ FARME EDITADO — ${cfg.NAME}`)
+          .setColor("#ffb020")
+          .setTitle(`🚨 EDITADO (00) — ${cfg.NAME}`)
           .setDescription(
             `👤 Usuário: <@${h.userId}>\n` +
               `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-              `📦 Nova quantidade: **${newQty}**\n` +
-              `➡️ Aplicado: **${h2?.aplicado ?? 0}** | Carry: **${h2?.carry ?? 0}**\n` +
-              `🛡️ Editado por: <@${message.author.id}>`
+              `📦 Nova quantidade (aprovada): **${newQty}**\n\n` +
+              `🔎 **ANTES**\n` +
+              `📄 Papel: ${bP}/100 (extra: ${bPC})\n` +
+              `🌱 Sementes: ${bS}/100 (extra: ${bSC})\n\n` +
+              `✅ **DEPOIS**\n` +
+              `📄 Papel: ${aP}/100 (extra: ${aPC})\n` +
+              `🌱 Sementes: ${aS}/100 (extra: ${aSC})\n\n` +
+              `🛡️ Por: <@${message.author.id}>`
           )
           .setTimestamp();
         if (thumb) logEmbed.setThumbnail(thumb);
@@ -1161,6 +1298,8 @@ client.on("messageCreate", async (message) => {
 
       await ensureUser(message.guild.id, h.userId);
 
+      const beforeUser = await rollToToday(message.guild.id, h.userId);
+
       const dbClient = await pool.connect();
       try {
         await dbClient.query("BEGIN");
@@ -1173,6 +1312,22 @@ client.on("messageCreate", async (message) => {
       } finally {
         dbClient.release();
       }
+
+      const afterUser = await rollToToday(message.guild.id, h.userId);
+
+      // ✅ registra no histórico (DESFEITO) para aparecer no !historico
+      await insertHistorico({
+        guildId: message.guild.id,
+        userId: h.userId,
+        tipo: h.tipo,
+        quantidade: 0,
+        status: "DESFEITO",
+        msgId: message.id,
+        gerenteId: message.author.id,
+        aplicado: 0,
+        carry: 0,
+        dia: todayKey(),
+      });
 
       // atualiza msg aprovada do bot
       try {
@@ -1211,14 +1366,24 @@ client.on("messageCreate", async (message) => {
 
       const logChannel = getLogChannel(message.guild);
       if (logChannel) {
+        const bP = Number(beforeUser?.papelHoje || 0), bPC = Number(beforeUser?.papelCarry || 0);
+        const bS = Number(beforeUser?.sementesHoje || 0), bSC = Number(beforeUser?.sementesCarry || 0);
+        const aP = Number(afterUser?.papelHoje || 0), aPC = Number(afterUser?.papelCarry || 0);
+        const aS = Number(afterUser?.sementesHoje || 0), aSC = Number(afterUser?.sementesCarry || 0);
+
         const logEmbed = new EmbedBuilder()
-          .setColor("#2b2d31")
-          .setTitle(`🔁 FARME DESFEITO — ${cfg.NAME}`)
+          .setColor("#ff4d4d")
+          .setTitle(`🚨 DESFEITO (00) — ${cfg.NAME}`)
           .setDescription(
             `👤 Usuário: <@${h.userId}>\n` +
-              `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-              `📦 Revertido para 0\n` +
-              `🛡️ Desfeito por: <@${message.author.id}>`
+              `🧾 Tipo: **${h.tipo.toUpperCase()}**\n\n` +
+              `🔎 **ANTES**\n` +
+              `📄 Papel: ${bP}/100 (extra: ${bPC})\n` +
+              `🌱 Sementes: ${bS}/100 (extra: ${bSC})\n\n` +
+              `✅ **DEPOIS**\n` +
+              `📄 Papel: ${aP}/100 (extra: ${aPC})\n` +
+              `🌱 Sementes: ${aS}/100 (extra: ${aSC})\n\n` +
+              `🛡️ Por: <@${message.author.id}>`
           )
           .setTimestamp();
         if (thumb) logEmbed.setThumbnail(thumb);
