@@ -9,7 +9,7 @@ const {
 } = require("discord.js");
 
 console.log(
-  "🔥 BUILD FINAL (FIX usuarios.id MIGRATION + !tabela + !relatorio + !naofarmou + !editar(reply) + !desfazer(reply) + DM 00:05) 🔥",
+  "🔥 BUILD FINAL (FIX usuarios.id MIGRATION + !tabela + !relatorio + !naofarmou + !editar(reply) + !desfazer(reply) + !ajuda por cargo + DM 00:05) 🔥",
   new Date().toISOString()
 );
 
@@ -286,6 +286,8 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    // (DMs) para mandar mensagem privada
+    GatewayIntentBits.DirectMessages,
   ],
   partials: [Partials.Channel, Partials.Message, Partials.GuildMember],
 });
@@ -751,14 +753,14 @@ async function runDailyAuditOnce() {
           .setTitle("⚠️ Meta diária não atingida")
           .setDescription(
             `🏷️ Servidor: **${cfg.NAME}**\n` +
-            `📅 Dia analisado: **${diaAuditado}**\n\n` +
-            `📄 Papel: **${r.papel_total}/${META_DIARIA}**\n` +
-            `🌱 Sementes: **${r.sementes_total}/${META_DIARIA}**\n\n` +
-            `❌ Faltou:\n` +
-            `• Papel: **${r.faltouP}**\n` +
-            `• Sementes: **${r.faltouS}**\n\n` +
-            `📦 Total faltante: **${totalFaltou}**\n\n` +
-            `Essa quantidade foi adicionada ao seu **Farme atrasado**.`
+              `📅 Dia analisado: **${diaAuditado}**\n\n` +
+              `📄 Papel: **${r.papel_total}/${META_DIARIA}**\n` +
+              `🌱 Sementes: **${r.sementes_total}/${META_DIARIA}**\n\n` +
+              `❌ Faltou:\n` +
+              `• Papel: **${r.faltouP}**\n` +
+              `• Sementes: **${r.faltouS}**\n\n` +
+              `📦 Total faltante: **${totalFaltou}**\n\n` +
+              `Essa quantidade foi adicionada ao seu **Farme atrasado**.`
           )
           .setTimestamp();
 
@@ -766,9 +768,7 @@ async function runDailyAuditOnce() {
         if (thumb) embedDM.setThumbnail(thumb);
 
         await member.send({ embeds: [embedDM] }).catch(() => null);
-      } catch (e) {
-        // ignora dm falhada
-      }
+      } catch (e) {}
     }
 
     const logChannel = getLogChannel(guild);
@@ -837,9 +837,47 @@ client.on("messageCreate", async (message) => {
     const lower = content.toLowerCase();
 
     // ==========================
+    // 📖 !ajuda (por permissão)
+    // ==========================
+    if (lower === "!ajuda") {
+      let title = "📖 Comandos disponíveis";
+      let desc = "";
+
+      // base (todos)
+      desc += `👤 **Membro**\n`;
+      desc += `\`!status\` — ver seu status do dia\n`;
+      desc += `\`!farme papel X\` / \`!farme sementes X\` — enviar farme com print (no canal correto)\n`;
+
+      // gerente/00
+      if (isGerente || is00) {
+        desc += `\n🛡️ **Gerente / 00**\n`;
+        desc += `\`!tabela\` / \`!tabela ontem\` — ranking de aprovados\n`;
+        desc += `\`!relatorio\` — relatório geral do dia\n`;
+        desc += `\`!naofarmou\` / \`!naofarmou @cargo\` — lista quem não teve farme aprovado\n`;
+      }
+
+      // 00
+      if (is00) {
+        desc += `\n👑 **Somente 00**\n`;
+        desc += `*(use reply na mensagem aprovada do bot)*\n`;
+        desc += `\`!editar 10\` — corrige a quantidade aprovada\n`;
+        desc += `\`!desfazer\` — volta o aprovado pra 0\n`;
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor("#2b2d31")
+        .setTitle(`${title} — ${cfg.NAME}`)
+        .setDescription(desc)
+        .setTimestamp();
+
+      const thumb = getThumb(client);
+      if (thumb) embed.setThumbnail(thumb);
+
+      return message.reply({ embeds: [embed] });
+    }
+
+    // ==========================
     // ✏️ !editar (SÓ 00) — reply no aprovado do BOT
-    // Ex: (reply) !editar 10
-    // Ex: (reply) !editar papel 10
     // ==========================
     if (lower.startsWith("!editar")) {
       if (!is00) return message.reply("❌ Só o **00** pode usar esse comando.");
@@ -893,21 +931,19 @@ client.on("messageCreate", async (message) => {
 
       const h2 = await getHistoricoAprovadoByMsgId(message.guild.id, refMsgId);
 
-      // tenta atualizar a mensagem aprovada do bot (no canal do reply)
+      // atualiza msg aprovada do bot
       try {
         const refMsg = await message.channel.messages.fetch(refMsgId);
         if (refMsg?.author?.id === client.user.id) {
-          await refMsg
-            .edit({
-              content:
-                `✅ **Aprovado (EDITADO)**\n` +
-                `📦 ${h.tipo.toUpperCase()} • ${newQty}\n` +
-                `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n\n` +
-                `👤 Usuário: <@${h.userId}>\n` +
-                `🛡️ Editado por: <@${message.author.id}>`,
-              components: [],
-            })
-            .catch(() => null);
+          await refMsg.edit({
+            content:
+              `✅ **Aprovado (EDITADO)**\n` +
+              `📦 ${h.tipo.toUpperCase()} • ${newQty}\n` +
+              `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n\n` +
+              `👤 Usuário: <@${h.userId}>\n` +
+              `🛡️ Editado por: <@${message.author.id}>`,
+            components: [],
+          }).catch(() => null);
         }
       } catch {}
 
@@ -916,10 +952,10 @@ client.on("messageCreate", async (message) => {
         .setTitle("✏️ Farme editado com sucesso")
         .setDescription(
           `👤 Usuário: <@${h.userId}>\n` +
-            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-            `📦 Nova quantidade: **${newQty}**\n` +
-            `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n` +
-            `📅 Dia: **${dia}**`
+          `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
+          `📦 Nova quantidade: **${newQty}**\n` +
+          `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n` +
+          `📅 Dia: **${dia}**`
         )
         .setTimestamp();
 
@@ -935,10 +971,10 @@ client.on("messageCreate", async (message) => {
           .setTitle(`✏️ FARME EDITADO — ${cfg.NAME}`)
           .setDescription(
             `👤 Usuário: <@${h.userId}>\n` +
-              `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-              `📦 Nova quantidade: **${newQty}**\n` +
-              `➡️ Aplicado: **${h2?.aplicado ?? 0}** | Carry: **${h2?.carry ?? 0}**\n` +
-              `🛡️ Editado por: <@${message.author.id}>`
+            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
+            `📦 Nova quantidade: **${newQty}**\n` +
+            `➡️ Aplicado: **${h2?.aplicado ?? 0}** | Carry: **${h2?.carry ?? 0}**\n` +
+            `🛡️ Editado por: <@${message.author.id}>`
           )
           .setTimestamp();
         if (thumb) logEmbed.setThumbnail(thumb);
@@ -980,21 +1016,19 @@ client.on("messageCreate", async (message) => {
         dbClient.release();
       }
 
-      // tenta atualizar a mensagem aprovada do bot
+      // atualiza msg aprovada do bot
       try {
         const refMsg = await message.channel.messages.fetch(refMsgId);
         if (refMsg?.author?.id === client.user.id) {
-          await refMsg
-            .edit({
-              content:
-                `🔁 **DESFEITO**\n` +
-                `📦 ${h.tipo.toUpperCase()} • 0\n` +
-                `➡️ Aplicado hoje: **0** | Extra (amanhã): **0**\n\n` +
-                `👤 Usuário: <@${h.userId}>\n` +
-                `🛡️ Desfeito por: <@${message.author.id}>`,
-              components: [],
-            })
-            .catch(() => null);
+          await refMsg.edit({
+            content:
+              `🔁 **DESFEITO**\n` +
+              `📦 ${h.tipo.toUpperCase()} • 0\n` +
+              `➡️ Aplicado hoje: **0** | Extra (amanhã): **0**\n\n` +
+              `👤 Usuário: <@${h.userId}>\n` +
+              `🛡️ Desfeito por: <@${message.author.id}>`,
+            components: [],
+          }).catch(() => null);
         }
       } catch {}
 
@@ -1003,10 +1037,10 @@ client.on("messageCreate", async (message) => {
         .setTitle("🔁 Farme desfeito com sucesso")
         .setDescription(
           `👤 Usuário: <@${h.userId}>\n` +
-            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-            `📦 Revertido para: **0**\n` +
-            `🛡️ Desfeito por: <@${message.author.id}>\n` +
-            `📅 Dia: **${dia}**`
+          `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
+          `📦 Revertido para: **0**\n` +
+          `🛡️ Desfeito por: <@${message.author.id}>\n` +
+          `📅 Dia: **${dia}**`
         )
         .setTimestamp();
 
@@ -1022,9 +1056,9 @@ client.on("messageCreate", async (message) => {
           .setTitle(`🔁 FARME DESFEITO — ${cfg.NAME}`)
           .setDescription(
             `👤 Usuário: <@${h.userId}>\n` +
-              `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-              `📦 Revertido para 0\n` +
-              `🛡️ Desfeito por: <@${message.author.id}>`
+            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
+            `📦 Revertido para 0\n` +
+            `🛡️ Desfeito por: <@${message.author.id}>`
           )
           .setTimestamp();
         if (thumb) logEmbed.setThumbnail(thumb);
@@ -1048,12 +1082,7 @@ client.on("messageCreate", async (message) => {
       const top5 = tabela.slice(0, 5);
 
       const topTxt = top5.length
-        ? top5
-            .map(
-              (r, i) =>
-                `${i + 1}. <@${r.userId}> — ✅ Total: **${r.total}** (📄 ${r.papel} | 🌱 ${r.sementes})`
-            )
-            .join("\n")
+        ? top5.map((r, i) => `${i + 1}. <@${r.userId}> — ✅ Total: **${r.total}** (📄 ${r.papel} | 🌱 ${r.sementes})`).join("\n")
         : "Nenhum farme aprovado hoje.";
 
       const embed = new EmbedBuilder()
@@ -1061,11 +1090,11 @@ client.on("messageCreate", async (message) => {
         .setTitle(`📊 Relatório Geral — ${cfg.NAME}`)
         .setDescription(
           `📅 Dia: **${dia}**\n\n` +
-            `👥 Membros com farme aprovado: **${resumo.total_membros}**\n` +
-            `📄 Total Papel aprovado: **${resumo.papel_total}**\n` +
-            `🌱 Total Sementes aprovadas: **${resumo.sementes_total}**\n` +
-            `📦 Total Geral aprovado: **${totalGeral}**\n\n` +
-            `🏆 **Top 5 do dia:**\n${topTxt}`
+          `👥 Membros com farme aprovado: **${resumo.total_membros}**\n` +
+          `📄 Total Papel aprovado: **${resumo.papel_total}**\n` +
+          `🌱 Total Sementes aprovadas: **${resumo.sementes_total}**\n` +
+          `📦 Total Geral aprovado: **${totalGeral}**\n\n` +
+          `🏆 **Top 5 do dia:**\n${topTxt}`
         )
         .setTimestamp();
 
@@ -1077,7 +1106,6 @@ client.on("messageCreate", async (message) => {
 
     // ==========================
     // 🚫 !naofarmou (somente gerente/00)
-    // Uso: !naofarmou | !naofarmou @cargo | !naofarmou NomeDoCargo
     // ==========================
     if (lower.startsWith("!naofarmou")) {
       if (!isGerente && !is00) return message.reply("❌ Sem permissão.");
