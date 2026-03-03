@@ -9,7 +9,7 @@ const {
 } = require("discord.js");
 
 console.log(
-  "🔥 BUILD FINAL (FIX usuarios.id MIGRATION + !tabela + !relatorio + !naofarmou + !editar(reply) + !desfazer(reply) + !ajuda por cargo + DM 00:05) 🔥",
+  "🔥 BUILD FINAL (FIX usuarios.id MIGRATION + !tabela + !relatorio + !naofarmou + !editar(reply) + !desfazer(reply) + !ajustar(00) + !ajuda por cargo + DM 00:05) 🔥",
   new Date().toISOString()
 );
 
@@ -669,6 +669,81 @@ async function recalcTipoDia(dbClient, guildId, userId, tipo, dia, editedRowId, 
 }
 
 // ==========================
+// ✅ AJUSTAR (SÓ 00) — sem reply, ajusta direto o saldo do usuário
+// Uso: !ajustar @membro papel +80
+//      !ajustar @membro papel -120
+//      !ajustar @membro sementes +50
+//      !ajustar @membro sementes -200
+// ==========================
+async function applyAdjustDirect(guildId, userId, tipo, delta) {
+  const u0 = await rollToToday(guildId, userId);
+  if (!u0) throw new Error("Usuário inválido");
+
+  let papelHoje = Number(u0.papelHoje || 0);
+  let sementesHoje = Number(u0.sementesHoje || 0);
+  let papelCarry = Number(u0.papelCarry || 0);
+  let sementesCarry = Number(u0.sementesCarry || 0);
+  let papelDebt = Number(u0.papelDebt || 0);
+  let sementesDebt = Number(u0.sementesDebt || 0);
+
+  const d = Number(delta || 0);
+  if (!d) return { before: u0, after: u0 };
+
+  if (tipo === "papel") {
+    if (d > 0) {
+      const restante = Math.max(0, 100 - papelHoje);
+      const aplicado = Math.min(d, restante);
+      const overflow = Math.max(0, d - aplicado);
+      papelHoje += aplicado;
+      papelCarry += overflow;
+    } else {
+      let remove = Math.abs(d);
+      const takeCarry = Math.min(remove, papelCarry);
+      papelCarry -= takeCarry;
+      remove -= takeCarry;
+
+      const takeHoje = Math.min(remove, papelHoje);
+      papelHoje -= takeHoje;
+      remove -= takeHoje;
+
+      // não mexe no debt aqui (ajuste administrativo)
+    }
+
+    await pool.query(
+      `UPDATE usuarios SET "papelHoje"=$1,"papelCarry"=$2,"papelDebt"=$3 WHERE "guildId"=$4 AND "userId"=$5`,
+      [papelHoje, papelCarry, papelDebt, guildId, userId]
+    );
+  } else if (tipo === "sementes") {
+    if (d > 0) {
+      const restante = Math.max(0, 100 - sementesHoje);
+      const aplicado = Math.min(d, restante);
+      const overflow = Math.max(0, d - aplicado);
+      sementesHoje += aplicado;
+      sementesCarry += overflow;
+    } else {
+      let remove = Math.abs(d);
+      const takeCarry = Math.min(remove, sementesCarry);
+      sementesCarry -= takeCarry;
+      remove -= takeCarry;
+
+      const takeHoje = Math.min(remove, sementesHoje);
+      sementesHoje -= takeHoje;
+      remove -= takeHoje;
+    }
+
+    await pool.query(
+      `UPDATE usuarios SET "sementesHoje"=$1,"sementesCarry"=$2,"sementesDebt"=$3 WHERE "guildId"=$4 AND "userId"=$5`,
+      [sementesHoje, sementesCarry, sementesDebt, guildId, userId]
+    );
+  } else {
+    throw new Error("tipo inválido");
+  }
+
+  const { rows } = await pool.query(`SELECT * FROM usuarios WHERE "guildId"=$1 AND "userId"=$2`, [guildId, userId]);
+  return { before: u0, after: rows[0] || u0 };
+}
+
+// ==========================
 // ✅ FECHAMENTO DIÁRIO + DM 00:05
 // ==========================
 async function getConfig(chave, defaultValue = null) {
@@ -840,7 +915,6 @@ client.on("messageCreate", async (message) => {
     // 📖 !ajuda (por permissão)
     // ==========================
     if (lower === "!ajuda") {
-      let title = "📖 Comandos disponíveis";
       let desc = "";
 
       // base (todos)
@@ -859,14 +933,19 @@ client.on("messageCreate", async (message) => {
       // 00
       if (is00) {
         desc += `\n👑 **Somente 00**\n`;
-        desc += `*(use reply na mensagem aprovada do bot)*\n`;
+        desc += `*(reply na mensagem aprovada do bot)*\n`;
         desc += `\`!editar 10\` — corrige a quantidade aprovada\n`;
         desc += `\`!desfazer\` — volta o aprovado pra 0\n`;
+        desc += `\n*(sem reply — ajuste administrativo direto no saldo)*\n`;
+        desc += `\`!ajustar @membro papel +80\`\n`;
+        desc += `\`!ajustar @membro papel -120\`\n`;
+        desc += `\`!ajustar @membro sementes +50\`\n`;
+        desc += `\`!ajustar @membro sementes -200\`\n`;
       }
 
       const embed = new EmbedBuilder()
         .setColor("#2b2d31")
-        .setTitle(`${title} — ${cfg.NAME}`)
+        .setTitle(`📖 Comandos disponíveis — ${cfg.NAME}`)
         .setDescription(desc)
         .setTimestamp();
 
@@ -874,6 +953,83 @@ client.on("messageCreate", async (message) => {
       if (thumb) embed.setThumbnail(thumb);
 
       return message.reply({ embeds: [embed] });
+    }
+
+    // ==========================
+    // 👑 !ajustar (SÓ 00) — sem reply
+    // ==========================
+    if (lower.startsWith("!ajustar")) {
+      if (!is00) return message.reply("❌ Só o **00** pode usar esse comando.");
+
+      const target = message.mentions.users.first();
+      if (!target) {
+        return message.reply("⚠️ Use assim: `!ajustar @membro papel +80` ou `!ajustar @membro sementes -120`");
+      }
+
+      const parts = content.split(/\s+/);
+      // parts[0]=!ajustar, parts[1]=@membro, parts[2]=tipo, parts[3]=delta
+      const tipo = (parts[2] || "").toLowerCase();
+      const deltaStr = parts[3] || "";
+
+      if (!["papel", "sementes"].includes(tipo)) {
+        return message.reply("❌ Tipo inválido. Use `papel` ou `sementes`.\nEx: `!ajustar @membro papel +80`");
+      }
+
+      if (!deltaStr) {
+        return message.reply("❌ Falta o valor. Ex: `!ajustar @membro papel -120`");
+      }
+
+      const delta = parseInt(deltaStr, 10);
+      if (isNaN(delta) || delta === 0) {
+        return message.reply("❌ Valor inválido. Use número inteiro diferente de 0.\nEx: `+80` ou `-120`");
+      }
+
+      await ensureUser(message.guild.id, target.id);
+
+      const { before, after } = await applyAdjustDirect(message.guild.id, target.id, tipo, delta);
+
+      const beforeHoje = tipo === "papel" ? Number(before.papelHoje || 0) : Number(before.sementesHoje || 0);
+      const beforeCarry = tipo === "papel" ? Number(before.papelCarry || 0) : Number(before.sementesCarry || 0);
+      const afterHoje = tipo === "papel" ? Number(after.papelHoje || 0) : Number(after.sementesHoje || 0);
+      const afterCarry = tipo === "papel" ? Number(after.papelCarry || 0) : Number(after.sementesCarry || 0);
+
+      const embed = new EmbedBuilder()
+        .setColor("#2b2d31")
+        .setTitle("👑 Ajuste aplicado (00)")
+        .setDescription(
+          `👤 Usuário: <@${target.id}>\n` +
+            `🧾 Tipo: **${tipo.toUpperCase()}**\n` +
+            `🔧 Ajuste: **${delta > 0 ? `+${delta}` : `${delta}`}**\n\n` +
+            `📌 Antes: **${beforeHoje}/100** (extra: ${beforeCarry})\n` +
+            `✅ Agora: **${afterHoje}/100** (extra: ${afterCarry})\n\n` +
+            `🛡️ Ajustado por: <@${message.author.id}>`
+        )
+        .setTimestamp();
+
+      const thumb = getThumb(client);
+      if (thumb) embed.setThumbnail(thumb);
+
+      await message.reply({ embeds: [embed] });
+
+      const logChannel = getLogChannel(message.guild);
+      if (logChannel) {
+        const logEmbed = new EmbedBuilder()
+          .setColor("#2b2d31")
+          .setTitle(`👑 AJUSTE (00) — ${cfg.NAME}`)
+          .setDescription(
+            `👤 Usuário: <@${target.id}>\n` +
+              `🧾 Tipo: **${tipo.toUpperCase()}**\n` +
+              `🔧 Ajuste: **${delta > 0 ? `+${delta}` : `${delta}`}**\n` +
+              `📌 Antes: ${beforeHoje}/100 (extra: ${beforeCarry})\n` +
+              `✅ Agora: ${afterHoje}/100 (extra: ${afterCarry})\n` +
+              `🛡️ Por: <@${message.author.id}>`
+          )
+          .setTimestamp();
+        if (thumb) logEmbed.setThumbnail(thumb);
+        await logChannel.send({ embeds: [logEmbed] }).catch(() => null);
+      }
+
+      return;
     }
 
     // ==========================
@@ -935,15 +1091,17 @@ client.on("messageCreate", async (message) => {
       try {
         const refMsg = await message.channel.messages.fetch(refMsgId);
         if (refMsg?.author?.id === client.user.id) {
-          await refMsg.edit({
-            content:
-              `✅ **Aprovado (EDITADO)**\n` +
-              `📦 ${h.tipo.toUpperCase()} • ${newQty}\n` +
-              `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n\n` +
-              `👤 Usuário: <@${h.userId}>\n` +
-              `🛡️ Editado por: <@${message.author.id}>`,
-            components: [],
-          }).catch(() => null);
+          await refMsg
+            .edit({
+              content:
+                `✅ **Aprovado (EDITADO)**\n` +
+                `📦 ${h.tipo.toUpperCase()} • ${newQty}\n` +
+                `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n\n` +
+                `👤 Usuário: <@${h.userId}>\n` +
+                `🛡️ Editado por: <@${message.author.id}>`,
+              components: [],
+            })
+            .catch(() => null);
         }
       } catch {}
 
@@ -952,10 +1110,10 @@ client.on("messageCreate", async (message) => {
         .setTitle("✏️ Farme editado com sucesso")
         .setDescription(
           `👤 Usuário: <@${h.userId}>\n` +
-          `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-          `📦 Nova quantidade: **${newQty}**\n` +
-          `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n` +
-          `📅 Dia: **${dia}**`
+            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
+            `📦 Nova quantidade: **${newQty}**\n` +
+            `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n` +
+            `📅 Dia: **${dia}**`
         )
         .setTimestamp();
 
@@ -971,10 +1129,10 @@ client.on("messageCreate", async (message) => {
           .setTitle(`✏️ FARME EDITADO — ${cfg.NAME}`)
           .setDescription(
             `👤 Usuário: <@${h.userId}>\n` +
-            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-            `📦 Nova quantidade: **${newQty}**\n` +
-            `➡️ Aplicado: **${h2?.aplicado ?? 0}** | Carry: **${h2?.carry ?? 0}**\n` +
-            `🛡️ Editado por: <@${message.author.id}>`
+              `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
+              `📦 Nova quantidade: **${newQty}**\n` +
+              `➡️ Aplicado: **${h2?.aplicado ?? 0}** | Carry: **${h2?.carry ?? 0}**\n` +
+              `🛡️ Editado por: <@${message.author.id}>`
           )
           .setTimestamp();
         if (thumb) logEmbed.setThumbnail(thumb);
@@ -1020,15 +1178,17 @@ client.on("messageCreate", async (message) => {
       try {
         const refMsg = await message.channel.messages.fetch(refMsgId);
         if (refMsg?.author?.id === client.user.id) {
-          await refMsg.edit({
-            content:
-              `🔁 **DESFEITO**\n` +
-              `📦 ${h.tipo.toUpperCase()} • 0\n` +
-              `➡️ Aplicado hoje: **0** | Extra (amanhã): **0**\n\n` +
-              `👤 Usuário: <@${h.userId}>\n` +
-              `🛡️ Desfeito por: <@${message.author.id}>`,
-            components: [],
-          }).catch(() => null);
+          await refMsg
+            .edit({
+              content:
+                `🔁 **DESFEITO**\n` +
+                `📦 ${h.tipo.toUpperCase()} • 0\n` +
+                `➡️ Aplicado hoje: **0** | Extra (amanhã): **0**\n\n` +
+                `👤 Usuário: <@${h.userId}>\n` +
+                `🛡️ Desfeito por: <@${message.author.id}>`,
+              components: [],
+            })
+            .catch(() => null);
         }
       } catch {}
 
@@ -1037,10 +1197,10 @@ client.on("messageCreate", async (message) => {
         .setTitle("🔁 Farme desfeito com sucesso")
         .setDescription(
           `👤 Usuário: <@${h.userId}>\n` +
-          `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-          `📦 Revertido para: **0**\n` +
-          `🛡️ Desfeito por: <@${message.author.id}>\n` +
-          `📅 Dia: **${dia}**`
+            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
+            `📦 Revertido para: **0**\n` +
+            `🛡️ Desfeito por: <@${message.author.id}>\n` +
+            `📅 Dia: **${dia}**`
         )
         .setTimestamp();
 
@@ -1056,9 +1216,9 @@ client.on("messageCreate", async (message) => {
           .setTitle(`🔁 FARME DESFEITO — ${cfg.NAME}`)
           .setDescription(
             `👤 Usuário: <@${h.userId}>\n` +
-            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-            `📦 Revertido para 0\n` +
-            `🛡️ Desfeito por: <@${message.author.id}>`
+              `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
+              `📦 Revertido para 0\n` +
+              `🛡️ Desfeito por: <@${message.author.id}>`
           )
           .setTimestamp();
         if (thumb) logEmbed.setThumbnail(thumb);
@@ -1090,11 +1250,11 @@ client.on("messageCreate", async (message) => {
         .setTitle(`📊 Relatório Geral — ${cfg.NAME}`)
         .setDescription(
           `📅 Dia: **${dia}**\n\n` +
-          `👥 Membros com farme aprovado: **${resumo.total_membros}**\n` +
-          `📄 Total Papel aprovado: **${resumo.papel_total}**\n` +
-          `🌱 Total Sementes aprovadas: **${resumo.sementes_total}**\n` +
-          `📦 Total Geral aprovado: **${totalGeral}**\n\n` +
-          `🏆 **Top 5 do dia:**\n${topTxt}`
+            `👥 Membros com farme aprovado: **${resumo.total_membros}**\n` +
+            `📄 Total Papel aprovado: **${resumo.papel_total}**\n` +
+            `🌱 Total Sementes aprovadas: **${resumo.sementes_total}**\n` +
+            `📦 Total Geral aprovado: **${totalGeral}**\n\n` +
+            `🏆 **Top 5 do dia:**\n${topTxt}`
         )
         .setTimestamp();
 
