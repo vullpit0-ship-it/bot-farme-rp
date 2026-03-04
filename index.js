@@ -1,9 +1,6 @@
-// ✅✅✅ ARQUIVO COMPLETO (com !ajustar + LOG antes/depois + !historico @membro SÓ 00 + !ajuda ajustado) ✅✅✅
+// ✅✅✅ ARQUIVO COMPLETO (com !ajustar + LOG antes/depois + !historico @membro SÓ 00 + !ajuda ajustado + AVISO CANAL DE DÉBITO + lastSeenAt) ✅✅✅
 // OBS: Mantive seu código e apliquei os ajustes pra não ter erro.
 
-// ==========================
-// IMPORTS
-// ==========================
 const {
   Client,
   GatewayIntentBits,
@@ -15,7 +12,7 @@ const {
 } = require("discord.js");
 
 console.log(
-  "🔥 BUILD FINAL (FIX usuarios.id MIGRATION + !tabela + !relatorio + !naofarmou + !editar(reply) + !desfazer(reply) + !ajustar(00) + !historico(00) + !ajuda por cargo + DM 00:05) 🔥",
+  "🔥 BUILD FINAL (+ ALERTA CANAL DE DÉBITO + lastSeenAt por msg + DM 00:05) 🔥",
   new Date().toISOString()
 );
 
@@ -35,6 +32,7 @@ const CONFIGS = {
     ROLE_00_ID: "1477850489189044365",
     LOG_CHANNEL_ID: "1477800551340310651",
     ENVIO_FARME_CHANNEL_ID: "1477777883714818098",
+    // (opcional) DEBIT_ALERT_CHANNEL_ID: "...."
   },
 
   [GUILD_ID_NOVA_ORDEM]: {
@@ -43,6 +41,7 @@ const CONFIGS = {
     ROLE_00_ID: "1469111029161136392",
     LOG_CHANNEL_ID: "1478096038114885704",
     ENVIO_FARME_CHANNEL_ID: "1478095912789082284",
+    DEBIT_ALERT_CHANNEL_ID: "1478556681070706951", // ✅ canal que você pediu
   },
 };
 
@@ -138,7 +137,6 @@ async function ensureHistoricoIndexes() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_dia ON historico ("dia");`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_created_at ON historico (created_at);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_guild_user_dia ON historico ("guildId","userId","dia");`);
-  // ✅ melhora o !historico
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_guild_user_created ON historico ("guildId","userId",created_at DESC);`);
 }
 
@@ -157,7 +155,8 @@ async function initDB() {
       "papelCarry" INTEGER DEFAULT 0,
       "sementesCarry" INTEGER DEFAULT 0,
       "papelDebt" INTEGER DEFAULT 0,
-      "sementesDebt" INTEGER DEFAULT 0
+      "sementesDebt" INTEGER DEFAULT 0,
+      "lastSeenAt" TIMESTAMPTZ
     );
 
     CREATE TABLE IF NOT EXISTS historico (
@@ -183,6 +182,9 @@ async function initDB() {
   `);
 
   await ensureUniqueIndexUsuarios();
+
+  // ✅ garante coluna lastSeenAt em quem já tinha tabela antiga
+  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "lastSeenAt" TIMESTAMPTZ;`);
 
   // Migração/reparo usuarios.id (caso antigo esteja TEXT ou sem default)
   if (await tableExists("usuarios")) {
@@ -313,6 +315,21 @@ function getLogChannel(guild) {
   return guild.channels.cache.get(cfg.LOG_CHANNEL_ID) || null;
 }
 
+function getDebitAlertChannel(guild) {
+  const cfg = getCfg(guild.id);
+  if (!cfg?.DEBIT_ALERT_CHANNEL_ID) return null;
+  return guild.channels.cache.get(cfg.DEBIT_ALERT_CHANNEL_ID) || null;
+}
+
+function getHighestRoleName(member) {
+  if (!member) return "-";
+  const roles = member.roles.cache
+    .filter((r) => r.id !== member.guild.id) // remove @everyone
+    .sort((a, b) => b.position - a.position);
+
+  return roles.first()?.name || "-";
+}
+
 function isEnvioChannel(message) {
   const cfg = getCfg(message.guild.id);
   if (!cfg) return false;
@@ -330,8 +347,8 @@ async function ensureUser(guildId, userId) {
   const hoje = todayKey();
 
   await pool.query(
-    `INSERT INTO usuarios ("guildId","userId","ultimoDia","papelHoje","sementesHoje","papelCarry","sementesCarry","papelDebt","sementesDebt")
-     VALUES ($1,$2,$3,0,0,0,0,0,0)
+    `INSERT INTO usuarios ("guildId","userId","ultimoDia","papelHoje","sementesHoje","papelCarry","sementesCarry","papelDebt","sementesDebt","lastSeenAt")
+     VALUES ($1,$2,$3,0,0,0,0,0,0,NULL)
      ON CONFLICT ("guildId","userId") DO NOTHING`,
     [guildId, userId, hoje]
   );
@@ -676,7 +693,7 @@ async function recalcTipoDia(dbClient, guildId, userId, tipo, dia, editedRowId, 
 }
 
 // ==========================
-// ✅ AJUSTAR (SÓ 00) — sem reply, ajusta direto o saldo do usuário
+// ✅ AJUSTAR (SÓ 00) — sem reply
 // ==========================
 async function applyAdjustDirect(guildId, userId, tipo, delta) {
   const u0 = await rollToToday(guildId, userId);
@@ -708,7 +725,6 @@ async function applyAdjustDirect(guildId, userId, tipo, delta) {
       const takeHoje = Math.min(remove, papelHoje);
       papelHoje -= takeHoje;
       remove -= takeHoje;
-      // não mexe em debt no ajuste manual
     }
 
     await pool.query(
@@ -758,13 +774,10 @@ function statusEmoji(status) {
   return "📌";
 }
 
-// ✅ LIMIT parametrizado (mais seguro)
 async function getHistoricoUser(guildId, userId, limit = 30, opts = {}) {
   const lim = Math.max(1, Math.min(100, Number(limit || 30)));
-
-  // filtros opcionais (não atrapalham se não usar)
-  const dia = opts?.dia || null; // todayKey() | yesterdayKey() | string
-  const tipo = opts?.tipo || null; // "papel" | "sementes"
+  const dia = opts?.dia || null;
+  const tipo = opts?.tipo || null;
 
   const params = [guildId, userId];
   let where = `WHERE "guildId"=$1 AND "userId"=$2`;
@@ -796,7 +809,7 @@ async function getHistoricoUser(guildId, userId, limit = 30, opts = {}) {
 }
 
 // ==========================
-// ✅ FECHAMENTO DIÁRIO + DM 00:05
+// ✅ FECHAMENTO DIÁRIO + DM 00:05 + AVISO NO CANAL
 // ==========================
 async function getConfig(chave, defaultValue = null) {
   const { rows } = await pool.query(`SELECT valor FROM bot_config WHERE chave=$1`, [chave]);
@@ -867,7 +880,7 @@ async function runDailyAuditOnce() {
       }
     }
 
-    // 🔔 DM automática para quem não bateu a meta
+    // 🔔 DM automática + 📢 aviso no canal (se configurado)
     for (const r of faltaram) {
       try {
         const member = await guild.members.fetch(r.userId).catch(() => null);
@@ -894,7 +907,54 @@ async function runDailyAuditOnce() {
         const thumb = getThumb(client);
         if (thumb) embedDM.setThumbnail(thumb);
 
+        // ✅ manda DM
         await member.send({ embeds: [embedDM] }).catch(() => null);
+
+        // ✅ dados atuais do banco (debt total + lastSeenAt)
+        const uRes = await pool.query(
+          `SELECT "papelDebt","sementesDebt","lastSeenAt"
+           FROM usuarios
+           WHERE "guildId"=$1 AND "userId"=$2
+           LIMIT 1`,
+          [guild.id, member.user.id]
+        );
+        const uRow = uRes.rows[0] || {};
+        const papelDebtNow = Number(uRow.papelDebt || 0);
+        const sementesDebtNow = Number(uRow.sementesDebt || 0);
+        const totalDebtNow = papelDebtNow + sementesDebtNow;
+
+        const lastSeenTxt = uRow.lastSeenAt
+          ? `<t:${Math.floor(new Date(uRow.lastSeenAt).getTime() / 1000)}:R>`
+          : "Sem registro";
+
+        const cargoAtual = getHighestRoleName(member);
+
+        // ✅ manda aviso no canal configurado (NOVA ORDEM)
+        const avisoChannel = getDebitAlertChannel(guild);
+        if (avisoChannel) {
+          const embedAviso = new EmbedBuilder()
+            .setColor("#ff4d4d")
+            .setTitle("🚨 Membro ficou devendo meta")
+            .setDescription(
+              `👤 Membro: **${member.user.tag}**\n` +
+                `🆔 ID: **${member.user.id}**\n` +
+                `🎭 Cargo atual: **${cargoAtual}**\n` +
+                `🕒 Último visto (pelo bot): **${lastSeenTxt}**\n\n` +
+                `📅 Dia auditado: **${diaAuditado}**\n\n` +
+                `❌ Faltou no dia:\n` +
+                `• Papel: **${r.faltouP}**\n` +
+                `• Sementes: **${r.faltouS}**\n` +
+                `📦 Total faltante: **${totalFaltou}**\n\n` +
+                `📌 Dívida acumulada agora:\n` +
+                `• Papel: **${papelDebtNow}**\n` +
+                `• Sementes: **${sementesDebtNow}**\n` +
+                `📦 Total acumulado: **${totalDebtNow}**`
+            )
+            .setTimestamp();
+
+          if (thumb) embedAviso.setThumbnail(thumb);
+          await avisoChannel.send({ embeds: [embedAviso] }).catch(() => null);
+        }
       } catch (e) {}
     }
 
@@ -956,6 +1016,14 @@ client.on("messageCreate", async (message) => {
 
     console.log("[MSG]", message.guild.id, message.channel.id, message.author.tag, JSON.stringify(message.content));
 
+    // ✅ garante usuário e marca "último visto"
+    await ensureUser(message.guild.id, message.author.id);
+    await pool.query(
+      `UPDATE usuarios SET "lastSeenAt"=NOW()
+       WHERE "guildId"=$1 AND "userId"=$2`,
+      [message.guild.id, message.author.id]
+    );
+
     const member = message.member || (await message.guild.members.fetch(message.author.id));
     const isGerente = member.roles.cache.has(cfg.GERENTE_ROLE_ID);
     const is00 = member.roles.cache.has(cfg.ROLE_00_ID);
@@ -964,7 +1032,7 @@ client.on("messageCreate", async (message) => {
     const lower = content.toLowerCase();
 
     // ==========================
-    // 📖 !ajuda (por permissão) ✅ AJUSTADO
+    // 📖 !ajuda
     // ==========================
     if (lower === "!ajuda") {
       let desc = "";
@@ -1006,15 +1074,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================
-    // 🧾 !historico (SÓ 00) ✅ AJUSTADO
-    // Uso:
-    //  !historico @membro
-    //  !historico @membro 50
-    //  !historico @membro hoje
-    //  !historico @membro ontem
-    //  !historico @membro papel
-    //  !historico @membro sementes
-    //  !historico @membro hoje papel 50
+    // 🧾 !historico (SÓ 00)
     // ==========================
     if (lower.startsWith("!historico")) {
       if (!is00) return message.reply("❌ Só o **00** pode usar esse comando.");
@@ -1024,7 +1084,6 @@ client.on("messageCreate", async (message) => {
 
       const parts = content.split(/\s+/);
 
-      // parse opcional
       let diaOpt = null;
       let tipoOpt = null;
       let limit = 30;
@@ -1081,7 +1140,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================
-    // 👑 !ajustar (SÓ 00) — sem reply
+    // 👑 !ajustar (SÓ 00)
     // ==========================
     if (lower.startsWith("!ajustar")) {
       if (!is00) return message.reply("❌ Só o **00** pode usar esse comando.");
@@ -1111,7 +1170,6 @@ client.on("messageCreate", async (message) => {
 
       const { before, after } = await applyAdjustDirect(message.guild.id, target.id, tipo, delta);
 
-      // grava no histórico
       await insertHistorico({
         guildId: message.guild.id,
         userId: target.id,
@@ -1154,7 +1212,6 @@ client.on("messageCreate", async (message) => {
 
       await message.reply({ embeds: [embed] });
 
-      // 🚨 LOG ANTES/DEPOIS ✅ AJUSTE ADMINISTRATIVO
       const logChannel = getLogChannel(message.guild);
       if (logChannel) {
         const logEmbed = new EmbedBuilder()
@@ -1432,7 +1489,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================
-    // 📊 !relatorio (somente gerente/00)
+    // 📊 !relatorio
     // ==========================
     if (lower === "!relatorio") {
       if (!isGerente && !is00) return message.reply("❌ Sem permissão.");
@@ -1453,11 +1510,11 @@ client.on("messageCreate", async (message) => {
         .setTitle(`📊 Relatório Geral — ${cfg.NAME}`)
         .setDescription(
           `📅 Dia: **${dia}**\n\n` +
-          `👥 Membros com farme aprovado: **${resumo.total_membros}**\n` +
-          `📄 Total Papel aprovado: **${resumo.papel_total}**\n` +
-          `🌱 Total Sementes aprovadas: **${resumo.sementes_total}**\n` +
-          `📦 Total Geral aprovado: **${totalGeral}**\n\n` +
-          `🏆 **Top 5 do dia:**\n${topTxt}`
+            `👥 Membros com farme aprovado: **${resumo.total_membros}**\n` +
+            `📄 Total Papel aprovado: **${resumo.papel_total}**\n` +
+            `🌱 Total Sementes aprovadas: **${resumo.sementes_total}**\n` +
+            `📦 Total Geral aprovado: **${totalGeral}**\n\n` +
+            `🏆 **Top 5 do dia:**\n${topTxt}`
         )
         .setTimestamp();
 
@@ -1468,7 +1525,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================
-    // 🚫 !naofarmou (somente gerente/00)
+    // 🚫 !naofarmou
     // ==========================
     if (lower.startsWith("!naofarmou")) {
       if (!isGerente && !is00) return message.reply("❌ Sem permissão.");
@@ -1527,7 +1584,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================
-    // 📊 !tabela (hoje/ontem)
+    // 📊 !tabela
     // ==========================
     if (lower.startsWith("!tabela")) {
       const parts = content.split(/\s+/);
