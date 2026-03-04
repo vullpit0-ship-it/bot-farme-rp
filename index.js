@@ -1,3 +1,5 @@
+me manda completo por favor eu tentei e deu erro me manda completo 
+
 // ✅✅✅ ARQUIVO COMPLETO (com !ajustar + LOG antes/depois + !historico @membro SÓ 00 + !ajuda ajustado + AVISO CANAL DE DÉBITO + lastSeenAt) ✅✅✅
 // OBS: Mantive seu código e apliquei os ajustes pra não ter erro.
 
