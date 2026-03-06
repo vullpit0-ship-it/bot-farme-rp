@@ -1,48 +1,125 @@
+// ======================================================
+// ✅ BOT COMPLETO / SLASH / SUPABASE / MULTI SERVIDOR
+// ✅ OPÇÃO B = SEM PAPEL/SEMENTES
+// ✅ ITENS: Pasta Base / Estabilizador / Saco Ziplock / Folha Bruta
+// ✅ RENDER + SUPABASE + PAINÉIS FIXOS + STAFF + AJUSTE 00
+// ======================================================
 
-// ✅✅✅ ARQUIVO COMPLETO (com !ajustar + LOG antes/depois + !historico @membro SÓ 00 + !ajuda ajustado + AVISO CANAL DE DÉBITO + lastSeenAt) ✅✅✅
-// OBS: Mantive seu código e apliquei os ajustes pra não ter erro.
+require("dotenv").config();
+
+const express = require("express");
+const cron = require("node-cron");
+const { Pool } = require("pg");
+const { DateTime } = require("luxon");
 
 const {
   Client,
   GatewayIntentBits,
+  Partials,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  ActionRowBuilder,
+  StringSelectMenuBuilder,
+  ChannelType,
+  PermissionFlagsBits,
   ButtonBuilder,
   ButtonStyle,
-  ActionRowBuilder,
   EmbedBuilder,
-  Partials,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require("discord.js");
 
-console.log(
-  "🔥 BUILD FINAL (+ ALERTA CANAL DE DÉBITO + lastSeenAt por msg + DM 00:05) 🔥",
-  new Date().toISOString()
-);
+console.log("🔥 BUILD SLASH + SUPABASE + MULTI GUILD 🔥", new Date().toISOString());
 
-const express = require("express");
-const { Pool } = require("pg");
+// ======================================================
+// 🌐 WEB SERVER (Render)
+// ======================================================
+const app = express();
+app.get("/", (req, res) => res.send("Bot online ✅"));
+app.listen(process.env.PORT || 3000, "0.0.0.0", () => {
+  console.log(`🌐 Web OK na porta ${process.env.PORT || 3000}`);
+});
 
-// ==========================
+// ======================================================
+// ✅ ENV
+// ======================================================
+if (!process.env.DISCORD_TOKEN) {
+  console.error("❌ Faltando DISCORD_TOKEN");
+  process.exit(1);
+}
+if (!process.env.CLIENT_ID) {
+  console.error("❌ Faltando CLIENT_ID");
+  process.exit(1);
+}
+if (!process.env.DATABASE_URL) {
+  console.error("❌ Faltando DATABASE_URL");
+  process.exit(1);
+}
+
+console.log("ENV CHECK:", {
+  hasToken: !!process.env.DISCORD_TOKEN,
+  hasClientId: !!process.env.CLIENT_ID,
+  hasDb: !!process.env.DATABASE_URL,
+  port: String(process.env.PORT || 3000),
+});
+
+process.on("unhandledRejection", (e) => console.error("🔥 UNHANDLED REJECTION:", e));
+process.on("uncaughtException", (e) => console.error("🔥 UNCAUGHT EXCEPTION:", e));
+
+// ======================================================
+// 🗄️ SUPABASE / POSTGRES
+// ======================================================
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+// ======================================================
 // ✅ CONFIG POR SERVIDOR
-// ==========================
+// ======================================================
 const GUILD_ID_TESTE = "1477774289414656213";
 const GUILD_ID_NOVA_ORDEM = "1469111028796227728";
 
 const CONFIGS = {
   [GUILD_ID_TESTE]: {
     NAME: "TESTE",
-    GERENTE_ROLE_ID: "1477779548484538539",
+
     ROLE_00_ID: "1477850489189044365",
-    LOG_CHANNEL_ID: "1477800551340310651",
-    ENVIO_FARME_CHANNEL_ID: "1477777883714818098",
-    // (opcional) DEBIT_ALERT_CHANNEL_ID: "...."
+    GERENTE_ROLE_ID: "1477779548484538539",
+    ROLE_MEMBRO_ID: "1477868954658541620",
+
+    FARME_CATEGORY_ID: "1478986272520274001",
+    LOG_CHANNEL_ID: "1478991741766864906",
+    REPORT_CHANNEL_ID: "1479024598166012007",
+    STAFF_TABLE_CHANNEL_ID: "1479158423684649167",
+    LEADERBOARD_CHANNEL_ID: "1479185447367479389",
+    PRODUCTIVITY_CHANNEL_ID: "1479185862196461638",
+
+    CLOSED_CATEGORY_ID: "",
+
+    DAILY_DM_WHITELIST: [
+      "1477868954658541620", // se isso aqui era role por engano, troque por userId real
+    ],
   },
 
   [GUILD_ID_NOVA_ORDEM]: {
     NAME: "NOVA ORDEM",
-    GERENTE_ROLE_ID: "1469111029161136386",
+
     ROLE_00_ID: "1469111029161136392",
+    GERENTE_ROLE_ID: "1469111029161136386",
+    ROLE_MEMBRO_ID: "",
+
+    FARME_CATEGORY_ID: "",
     LOG_CHANNEL_ID: "1478096038114885704",
-    ENVIO_FARME_CHANNEL_ID: "1478095912789082284",
-    DEBIT_ALERT_CHANNEL_ID: "1478556681070706951", // ✅ canal que você pediu
+    REPORT_CHANNEL_ID: "",
+    STAFF_TABLE_CHANNEL_ID: "",
+    LEADERBOARD_CHANNEL_ID: "",
+    PRODUCTIVITY_CHANNEL_ID: "",
+
+    CLOSED_CATEGORY_ID: "",
+    DAILY_DM_WHITELIST: [],
   },
 };
 
@@ -50,130 +127,126 @@ function getCfg(guildId) {
   return CONFIGS[guildId] || null;
 }
 
-const LOGO_URL = process.env.LOGO_URL || null;
-const META_DIARIA = 100;
+// ======================================================
+// ⚙️ GERAL
+// ======================================================
+const TZ = "America/Cuiaba";
+const COOLDOWN_SECONDS = 60;
+const CLEANUP_EVERY_MS = 6 * 60 * 60 * 1000;
+const DELETE_CLOSED_OLDER_THAN_DAYS = 14;
+const DELETE_PENDING_OLDER_THAN_DAYS = 7;
 
-// ⏰ Fechamento diário (00:05)
-const DAILY_AUDIT_HOUR = 0;
-const DAILY_AUDIT_MIN = 5;
+const FARME_OPTIONS = [
+  { label: "Pasta Base", value: "pasta-base", description: "Canal privado: Pasta Base" },
+  { label: "Estabilizador", value: "estabilizador", description: "Canal privado: Estabilizador" },
+  { label: "Saco Ziplock", value: "saco-ziplock", description: "Canal privado: Saco Ziplock" },
+  { label: "Folha Bruta", value: "folha-bruta", description: "Canal privado: Folha Bruta" },
+];
 
-// ==========================
-// 🌐 WEB (Render healthcheck)
-// ==========================
-const app = express();
-app.get("/", (req, res) => res.send("Bot online ✅"));
-app.listen(process.env.PORT || 3000, () => console.log("Web OK"));
-
-// ==========================
-// 🗄️ POSTGRES (SUPABASE)
-// ==========================
-if (!process.env.DATABASE_URL) {
-  console.error("Faltando DATABASE_URL nas env vars (Render).");
-  process.exit(1);
-}
-if (!process.env.DISCORD_TOKEN) {
-  console.error("Faltando DISCORD_TOKEN nas env vars (Render).");
-  process.exit(1);
-}
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+// ======================================================
+// 🤖 CLIENT
+// ======================================================
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+  partials: [Partials.Channel],
 });
 
-function nowBR() {
-  return new Date().toLocaleString("pt-BR");
-}
-function todayKey() {
-  return new Date().toDateString();
-}
-function yesterdayKey() {
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  return d.toDateString();
-}
+client.on("warn", (m) => console.warn("⚠️ WARN:", m));
+client.on("error", (e) => console.error("🔥 CLIENT ERROR:", e));
+client.on("shardError", (e) => console.error("🔥 SHARD ERROR:", e));
+client.on("shardDisconnect", (event, shardId) => console.warn(`⚠️ SHARD ${shardId} DISCONNECT:`, event?.reason || event));
+client.on("shardReconnecting", (shardId) => console.warn(`♻️ SHARD ${shardId} RECONNECTING...`));
+client.on("shardResume", (shardId) => console.log(`✅ SHARD ${shardId} RESUMED.`));
+client.on("invalidated", () => console.error("🔥 CLIENT INVALIDATED"));
 
-function getThumb(interactionOrClient) {
-  const avatar =
-    interactionOrClient?.user?.displayAvatarURL?.() ||
-    interactionOrClient?.client?.user?.displayAvatarURL?.() ||
-    null;
-  return LOGO_URL || avatar || null;
-}
-
-async function tableExists(tableName) {
-  const { rows } = await pool.query(`SELECT to_regclass($1) AS reg`, [
-    `public.${tableName}`,
-  ]);
-  return !!rows[0]?.reg;
-}
-
-async function getUsuariosIdColumnInfo() {
-  const { rows } = await pool.query(`
-    SELECT
-      column_name,
-      data_type,
-      is_nullable,
-      column_default,
-      is_identity,
-      identity_generation
-    FROM information_schema.columns
-    WHERE table_schema='public'
-      AND table_name='usuarios'
-      AND column_name='id'
-    LIMIT 1;
-  `);
-  return rows[0] || null;
-}
-
-async function ensureUniqueIndexUsuarios() {
-  await pool.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS usuarios_guild_user_unique
-    ON usuarios ("guildId","userId");
-  `);
-}
-
-async function ensureHistoricoIndexes() {
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_msgId ON historico ("msgId");`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_dia ON historico ("dia");`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_created_at ON historico (created_at);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_guild_user_dia ON historico ("guildId","userId","dia");`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_historico_guild_user_created ON historico ("guildId","userId",created_at DESC);`);
-}
-
-// ==========================
-// 🧱 INIT DB (MIGRAÇÃO)
-// ==========================
+// ======================================================
+// 🧱 DB INIT
+// ======================================================
 async function initDB() {
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS usuarios (
+    CREATE TABLE IF NOT EXISTS farme_requests (
       id BIGSERIAL PRIMARY KEY,
       "guildId" TEXT NOT NULL,
-      "userId"  TEXT NOT NULL,
-      "ultimoDia" TEXT,
-      "papelHoje" INTEGER DEFAULT 0,
-      "sementesHoje" INTEGER DEFAULT 0,
-      "papelCarry" INTEGER DEFAULT 0,
-      "sementesCarry" INTEGER DEFAULT 0,
-      "papelDebt" INTEGER DEFAULT 0,
-      "sementesDebt" INTEGER DEFAULT 0,
-      "lastSeenAt" TIMESTAMPTZ
+      "requestId" TEXT NOT NULL,
+      "messageId" TEXT NOT NULL,
+      "channelId" TEXT NOT NULL,
+      "userId" TEXT NOT NULL,
+      "userTag" TEXT,
+      "itemValue" TEXT NOT NULL,
+      "itemLabel" TEXT NOT NULL,
+      quantidade INTEGER NOT NULL DEFAULT 0,
+      "originalQuantidade" INTEGER NOT NULL DEFAULT 0,
+      "printUrl" TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      "decidedAt" TIMESTAMPTZ,
+      "decidedById" TEXT,
+      "decidedByTag" TEXT,
+      "denyReason" TEXT,
+      "adjustedAt" TIMESTAMPTZ,
+      "adjustedById" TEXT,
+      "adjustedByTag" TEXT,
+      "adjustedDelta" INTEGER NOT NULL DEFAULT 0,
+      "adjustedNote" TEXT,
+      "closedAt" TIMESTAMPTZ,
+      "closedById" TEXT,
+      "closedByTag" TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS historico (
+    CREATE UNIQUE INDEX IF NOT EXISTS farme_requests_request_unique
+    ON farme_requests ("guildId","requestId");
+
+    CREATE INDEX IF NOT EXISTS idx_farme_requests_channel
+    ON farme_requests ("guildId","channelId");
+
+    CREATE INDEX IF NOT EXISTS idx_farme_requests_user
+    ON farme_requests ("guildId","userId");
+
+    CREATE INDEX IF NOT EXISTS idx_farme_requests_status
+    ON farme_requests ("guildId",status);
+
+    CREATE TABLE IF NOT EXISTS farme_totals (
       id BIGSERIAL PRIMARY KEY,
-      "guildId" TEXT,
-      "userId" TEXT,
-      tipo TEXT,
-      quantidade INTEGER,
-      status TEXT,
-      data TEXT,
-      dia TEXT,
-      "msgId" TEXT,
-      "gerenteId" TEXT,
-      aplicado INTEGER,
-      carry INTEGER,
-      created_at TIMESTAMPTZ DEFAULT NOW()
+      "guildId" TEXT NOT NULL,
+      "userId" TEXT NOT NULL,
+      "itemValue" TEXT NOT NULL,
+      total INTEGER NOT NULL DEFAULT 0,
+      UNIQUE ("guildId","userId","itemValue")
+    );
+
+    CREATE TABLE IF NOT EXISTS farme_daily (
+      id BIGSERIAL PRIMARY KEY,
+      "guildId" TEXT NOT NULL,
+      "dateKey" TEXT NOT NULL,
+      "userId" TEXT NOT NULL,
+      "itemValue" TEXT NOT NULL,
+      total INTEGER NOT NULL DEFAULT 0,
+      UNIQUE ("guildId","dateKey","userId","itemValue")
+    );
+
+    CREATE TABLE IF NOT EXISTS farme_channels (
+      id BIGSERIAL PRIMARY KEY,
+      "guildId" TEXT NOT NULL,
+      "userId" TEXT NOT NULL,
+      "itemValue" TEXT NOT NULL,
+      "channelId" TEXT NOT NULL,
+      UNIQUE ("guildId","userId","itemValue")
+    );
+
+    CREATE TABLE IF NOT EXISTS farme_cooldowns (
+      id BIGSERIAL PRIMARY KEY,
+      "guildId" TEXT NOT NULL,
+      "userId" TEXT NOT NULL,
+      "lastAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE ("guildId","userId")
+    );
+
+    CREATE TABLE IF NOT EXISTS farme_fixed_messages (
+      id BIGSERIAL PRIMARY KEY,
+      "guildId" TEXT NOT NULL,
+      chave TEXT NOT NULL,
+      valor TEXT,
+      UNIQUE ("guildId", chave)
     );
 
     CREATE TABLE IF NOT EXISTS bot_config (
@@ -182,1690 +255,1359 @@ async function initDB() {
     );
   `);
 
-  await ensureUniqueIndexUsuarios();
-
-  // ✅ garante coluna lastSeenAt em quem já tinha tabela antiga
-  await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS "lastSeenAt" TIMESTAMPTZ;`);
-
-  // Migração/reparo usuarios.id (caso antigo esteja TEXT ou sem default)
-  if (await tableExists("usuarios")) {
-    const info = await getUsuariosIdColumnInfo();
-    if (info) {
-      const dataType = (info.data_type || "").toLowerCase();
-      const isIdentity = info.is_identity === "YES";
-      const hasDefault = !!info.column_default;
-
-      console.log("ℹ️ usuarios.id:", {
-        dataType,
-        isNullable: info.is_nullable,
-        isIdentity,
-        hasDefault,
-        columnDefault: info.column_default,
-      });
-
-      const isNumeric = ["bigint", "integer", "smallint"].includes(dataType);
-
-      if (isNumeric && !isIdentity && !hasDefault) {
-        console.log("⚠️ usuarios.id numérico sem DEFAULT/IDENTITY — corrigindo...");
-        try {
-          await pool.query(
-            `ALTER TABLE public.usuarios ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY;`
-          );
-          console.log("✅ usuarios.id virou IDENTITY");
-        } catch (e) {
-          console.log("⚠️ Falhou IDENTITY, usando sequence...", e?.message || e);
-          await pool.query(`CREATE SEQUENCE IF NOT EXISTS public.usuarios_id_seq;`);
-          await pool.query(
-            `ALTER TABLE public.usuarios ALTER COLUMN id SET DEFAULT nextval('public.usuarios_id_seq');`
-          );
-          await pool.query(`
-            SELECT setval(
-              'public.usuarios_id_seq',
-              COALESCE((SELECT MAX(id) FROM public.usuarios), 0) + 1,
-              false
-            );
-          `);
-          console.log("✅ usuarios.id DEFAULT via sequence OK");
-        }
-      }
-
-      if (!isNumeric) {
-        console.log("⚠️ usuarios.id NÃO é numérico (provável TEXT). Migrando para BIGSERIAL...");
-        const c = await pool.connect();
-        try {
-          await c.query("BEGIN");
-
-          await c.query(`ALTER TABLE public.usuarios ADD COLUMN IF NOT EXISTS id_new BIGSERIAL;`);
-
-          const pk = await c.query(`
-            SELECT constraint_name
-            FROM information_schema.table_constraints
-            WHERE table_schema='public'
-              AND table_name='usuarios'
-              AND constraint_type='PRIMARY KEY'
-            LIMIT 1;
-          `);
-
-          if (pk.rows[0]?.constraint_name) {
-            await c.query(`ALTER TABLE public.usuarios DROP CONSTRAINT ${pk.rows[0].constraint_name};`);
-          }
-
-          await c.query(`ALTER TABLE public.usuarios DROP COLUMN id;`);
-          await c.query(`ALTER TABLE public.usuarios RENAME COLUMN id_new TO id;`);
-          await c.query(`ALTER TABLE public.usuarios ADD PRIMARY KEY (id);`);
-
-          await c.query("COMMIT");
-          console.log("✅ Migração usuarios.id (TEXT -> BIGSERIAL) concluída");
-        } catch (e) {
-          await c.query("ROLLBACK");
-          console.error("❌ Falha migrando usuarios.id:", e?.stack || e);
-          throw e;
-        } finally {
-          c.release();
-        }
-      }
-    }
-  }
-
-  await ensureHistoricoIndexes();
-
-  // normaliza nulls
-  await pool.query(
-    `
-    UPDATE usuarios
-    SET
-      "papelHoje" = COALESCE("papelHoje", 0),
-      "sementesHoje" = COALESCE("sementesHoje", 0),
-      "papelCarry" = COALESCE("papelCarry", 0),
-      "sementesCarry" = COALESCE("sementesCarry", 0),
-      "papelDebt" = COALESCE("papelDebt", 0),
-      "sementesDebt" = COALESCE("sementesDebt", 0),
-      "ultimoDia" = COALESCE("ultimoDia", $1)
-  `,
-    [todayKey()]
-  );
-
-  console.log("DB OK (PostgreSQL / Supabase)");
+  console.log("✅ DB OK (farme_requests, farme_totals, farme_daily...)");
 }
 
-// ==========================
-// 🤖 CLIENT
-// ==========================
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages,
-  ],
-  partials: [Partials.Channel, Partials.Message, Partials.GuildMember],
-});
-
-client.once("clientReady", () => {
-  console.log("Bot online como", client.user?.tag);
-  startDailyAuditLoop().catch((e) => console.error("Erro startDailyAuditLoop:", e));
-});
-
-// ==========================
+// ======================================================
 // 🧠 HELPERS
-// ==========================
-function getLogChannel(guild) {
-  const cfg = getCfg(guild.id);
-  if (!cfg) return null;
-  return guild.channels.cache.get(cfg.LOG_CHANNEL_ID) || null;
+// ======================================================
+function slugUser(u) {
+  return (u?.username || "membro").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12);
 }
 
-function getDebitAlertChannel(guild) {
-  const cfg = getCfg(guild.id);
-  if (!cfg?.DEBIT_ALERT_CHANNEL_ID) return null;
-  return guild.channels.cache.get(cfg.DEBIT_ALERT_CHANNEL_ID) || null;
+function is00(member, cfg) {
+  return !!member?.roles?.cache?.has(cfg.ROLE_00_ID);
 }
 
-function getHighestRoleName(member) {
-  if (!member) return "-";
-  const roles = member.roles.cache
-    .filter((r) => r.id !== member.guild.id) // remove @everyone
-    .sort((a, b) => b.position - a.position);
-
-  return roles.first()?.name || "-";
+function isStaff(member, cfg) {
+  return !!member?.roles?.cache?.has(cfg.ROLE_00_ID) || !!member?.roles?.cache?.has(cfg.GERENTE_ROLE_ID);
 }
 
-function isEnvioChannel(message) {
-  const cfg = getCfg(message.guild.id);
-  if (!cfg) return false;
-  return message.channel.id === cfg.ENVIO_FARME_CHANNEL_ID;
-}
-
-async function ensureUser(guildId, userId) {
-  guildId = String(guildId ?? "");
-  userId = String(userId ?? "");
-  if (!guildId || !userId) return null;
-
-  let res = await pool.query(`SELECT * FROM usuarios WHERE "guildId"=$1 AND "userId"=$2`, [guildId, userId]);
-  if (res.rows[0]) return res.rows[0];
-
-  const hoje = todayKey();
-
-  await pool.query(
-    `INSERT INTO usuarios ("guildId","userId","ultimoDia","papelHoje","sementesHoje","papelCarry","sementesCarry","papelDebt","sementesDebt","lastSeenAt")
-     VALUES ($1,$2,$3,0,0,0,0,0,0,NULL)
-     ON CONFLICT ("guildId","userId") DO NOTHING`,
-    [guildId, userId, hoje]
-  );
-
-  res = await pool.query(`SELECT * FROM usuarios WHERE "guildId"=$1 AND "userId"=$2`, [guildId, userId]);
-  return res.rows[0] || null;
-}
-
-async function rollToToday(guildId, userId) {
-  const hoje = todayKey();
-  const u = await ensureUser(guildId, userId);
-  if (!u) return null;
-  if (u.ultimoDia === hoje) return u;
-
-  const papelCarry = Number(u.papelCarry || 0);
-  const sementesCarry = Number(u.sementesCarry || 0);
-
-  const papelHoje = Math.min(100, papelCarry);
-  const sementesHoje = Math.min(100, sementesCarry);
-
-  const novoPapelCarry = Math.max(0, papelCarry - 100);
-  const novoSementesCarry = Math.max(0, sementesCarry - 100);
-
-  await pool.query(
-    `UPDATE usuarios
-     SET "ultimoDia"=$1,
-         "papelHoje"=$2,
-         "sementesHoje"=$3,
-         "papelCarry"=$4,
-         "sementesCarry"=$5
-     WHERE "guildId"=$6 AND "userId"=$7`,
-    [hoje, papelHoje, sementesHoje, novoPapelCarry, novoSementesCarry, guildId, userId]
-  );
-
-  const r = await pool.query(`SELECT * FROM usuarios WHERE "guildId"=$1 AND "userId"=$2`, [guildId, userId]);
-  return r.rows[0] || null;
-}
-
-async function insertHistorico({ guildId, userId, tipo, quantidade, status, msgId, gerenteId, aplicado, carry, dia }) {
-  await pool.query(
-    `INSERT INTO historico ("guildId","userId",tipo,quantidade,status,data,dia,"msgId","gerenteId",aplicado,carry)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-    [guildId, userId, tipo, quantidade, status, nowBR(), dia || todayKey(), msgId, gerenteId, aplicado ?? null, carry ?? null]
+function isTrackedMember(member, cfg) {
+  if (!member || member.user?.bot) return false;
+  const roles = member.roles?.cache;
+  return (
+    (cfg.ROLE_MEMBRO_ID && roles?.has(cfg.ROLE_MEMBRO_ID)) ||
+    (cfg.GERENTE_ROLE_ID && roles?.has(cfg.GERENTE_ROLE_ID)) ||
+    (cfg.ROLE_00_ID && roles?.has(cfg.ROLE_00_ID))
   );
 }
 
-async function alreadyProcessed(guildId, msgId) {
-  const { rows } = await pool.query(
-    `SELECT id FROM historico WHERE "guildId"=$1 AND "msgId"=$2 AND (status='APROVADO' OR status='NEGADO') LIMIT 1`,
-    [guildId, msgId]
-  );
-  return !!rows[0];
+function parseItemFromChannelName(channelName) {
+  if (!channelName?.startsWith("farme-")) return null;
+  const parts = channelName.split("-");
+  if (parts.length < 3) return null;
+  const item = parts.slice(1, parts.length - 1).join("-");
+  return FARME_OPTIONS.find((o) => o.value === item) || null;
 }
 
-function formatDebtLine(papelDebt, sementesDebt) {
-  const parts = [];
-  if (papelDebt > 0) parts.push(`PAPEL **${papelDebt}**`);
-  if (sementesDebt > 0) parts.push(`SEMENTES **${sementesDebt}**`);
-  if (!parts.length) return null;
-  return `❌ Farme atrasado: ${parts.join(" | ")}`;
+function channelLink(guildId, channelId) {
+  return `https://discord.com/channels/${guildId}/${channelId}`;
 }
 
-function formatFaltamLine(faltamP, faltamS) {
-  return `📌 Hoje faltam pra meta: PAPEL **${faltamP}** | SEMENTES **${faltamS}**`;
+function dateKeyNow() {
+  return DateTime.now().setZone(TZ).toISODate();
 }
 
-function formatAtrasadoTotalLine(papelDebt, sementesDebt) {
-  const total = Math.max(0, Number(papelDebt || 0)) + Math.max(0, Number(sementesDebt || 0));
-  return `📦 Atrasado total acumulado: **${total}**`;
+function resolveDateKeyFromOption({ dia, dataStr }) {
+  const now = DateTime.now().setZone(TZ);
+  if (dia === "hoje") return now.toISODate();
+  if (dia === "ontem") return now.minus({ days: 1 }).toISODate();
+
+  const raw = (dataStr || "").trim();
+  const dt = DateTime.fromISO(raw, { zone: TZ });
+  if (!dt.isValid) return null;
+  return dt.toISODate();
 }
 
-async function getTotaisDia(guildId, userId, diaStr) {
-  const { rows } = await pool.query(
-    `
-    SELECT
-      COALESCE(SUM(CASE WHEN status='APROVADO' AND tipo='papel' THEN COALESCE(aplicado,0) ELSE 0 END),0)::int AS papel_total,
-      COALESCE(SUM(CASE WHEN status='APROVADO' AND tipo='sementes' THEN COALESCE(aplicado,0) ELSE 0 END),0)::int AS sementes_total
-    FROM historico
-    WHERE "guildId"=$1 AND "userId"=$2 AND dia=$3
-    `,
-    [guildId, userId, diaStr]
-  );
-  return { papel: rows[0]?.papel_total ?? 0, sementes: rows[0]?.sementes_total ?? 0 };
+function daysToMs(d) {
+  return d * 24 * 60 * 60 * 1000;
 }
 
-// ==========================
-// 📊 TABELA / RELATÓRIO / NÃO FARMOU
-// ==========================
-async function getTabelaResumoDia(guildId, diaStr) {
-  const { rows } = await pool.query(
-    `
-    SELECT
-      "userId",
-      COALESCE(SUM(CASE WHEN status='APROVADO' AND tipo='papel'   THEN COALESCE(aplicado,0) ELSE 0 END),0)::int AS papel,
-      COALESCE(SUM(CASE WHEN status='APROVADO' AND tipo='sementes' THEN COALESCE(aplicado,0) ELSE 0 END),0)::int AS sementes,
-      COALESCE(SUM(CASE WHEN status='APROVADO' THEN COALESCE(aplicado,0) ELSE 0 END),0)::int AS total
-    FROM historico
-    WHERE "guildId"=$1 AND dia=$2 AND status='APROVADO'
-    GROUP BY "userId"
-    HAVING COALESCE(SUM(CASE WHEN status='APROVADO' THEN COALESCE(aplicado,0) ELSE 0 END),0) > 0
-    ORDER BY total DESC, papel DESC, sementes DESC
-    `,
-    [guildId, diaStr]
-  );
-  return rows;
-}
-
-async function getResumoGeralDia(guildId, diaStr) {
-  const { rows } = await pool.query(
-    `
-    SELECT
-      COUNT(DISTINCT "userId")::int AS total_membros,
-      COALESCE(SUM(CASE WHEN status='APROVADO' AND tipo='papel' THEN COALESCE(aplicado,0) ELSE 0 END),0)::int AS papel_total,
-      COALESCE(SUM(CASE WHEN status='APROVADO' AND tipo='sementes' THEN COALESCE(aplicado,0) ELSE 0 END),0)::int AS sementes_total
-    FROM historico
-    WHERE "guildId"=$1 AND dia=$2 AND status='APROVADO'
-    `,
-    [guildId, diaStr]
-  );
-  return rows[0] || { total_membros: 0, papel_total: 0, sementes_total: 0 };
-}
-
-async function getAprovadosUserIdsDia(guildId, diaStr) {
-  const { rows } = await pool.query(
-    `
-    SELECT DISTINCT "userId"
-    FROM historico
-    WHERE "guildId"=$1 AND dia=$2 AND status='APROVADO'
-    `,
-    [guildId, diaStr]
-  );
-  return new Set(rows.map((r) => String(r.userId)));
-}
-
-function chunkTextLines(lines, maxLen = 3800) {
-  const chunks = [];
-  let cur = "";
-  for (const line of lines) {
-    if ((cur + "\n" + line).length > maxLen) {
-      chunks.push(cur);
-      cur = line;
+function splitIntoPages(rows, maxLen = 3500) {
+  const pages = [];
+  let current = "";
+  for (const r of rows) {
+    const add = (current ? "\n\n" : "") + r;
+    if ((current + add).length > maxLen) {
+      pages.push(current);
+      current = r;
     } else {
-      cur = cur ? cur + "\n" + line : line;
+      current += add;
     }
   }
-  if (cur) chunks.push(cur);
-  return chunks;
+  if (current) pages.push(current);
+  return pages;
 }
 
-function resolveRoleFromMessage(message, rawArg) {
-  const mentioned = message.mentions?.roles?.first?.();
-  if (mentioned) return mentioned;
+function makeRequestEmbed({ userTag, userId, itemLabel, quantidade, status, approverTag, reason, adjustedInfo }) {
+  const embed = new EmbedBuilder()
+    .setTitle("📦 Solicitação de Farme")
+    .setDescription("Detalhes da solicitação abaixo.")
+    .addFields(
+      { name: "👤 Membro", value: `<@${userId}> (${userTag || userId})`, inline: false },
+      { name: "🧾 Item", value: itemLabel, inline: true },
+      { name: "🔢 Quantidade", value: String(quantidade), inline: true },
+      { name: "📌 Status", value: status, inline: true }
+    )
+    .setTimestamp(new Date());
 
-  const name = (rawArg || "").trim();
-  if (!name) return null;
+  if (approverTag) embed.addFields({ name: "✅ Avaliado por", value: approverTag, inline: false });
+  if (reason) embed.addFields({ name: "📝 Motivo", value: reason, inline: false });
+  if (adjustedInfo) embed.addFields({ name: "🛠️ Ajuste (00)", value: adjustedInfo, inline: false });
 
-  const role = message.guild.roles.cache.find((r) => r.name.toLowerCase() === name.toLowerCase());
-  return role || null;
+  return embed;
 }
 
-// ==========================
-// ✅ APPLY FARM (BOTÃO APROVAR)
-// ==========================
-async function applyFarm(guildId, userId, tipo, quantidade) {
-  const u0 = await rollToToday(guildId, userId);
-  if (!u0) throw new Error("Usuário inválido (rollToToday retornou null)");
+function publicButtons({ disabled = false } = {}) {
+  const approve = new ButtonBuilder()
+    .setCustomId("farme_public_aprovar")
+    .setLabel("Aprovar")
+    .setStyle(ButtonStyle.Success)
+    .setDisabled(disabled);
 
-  let papelHoje = Number(u0.papelHoje || 0);
-  let sementesHoje = Number(u0.sementesHoje || 0);
-  let papelCarry = Number(u0.papelCarry || 0);
-  let sementesCarry = Number(u0.sementesCarry || 0);
-  let papelDebt = Number(u0.papelDebt || 0);
-  let sementesDebt = Number(u0.sementesDebt || 0);
+  const deny = new ButtonBuilder()
+    .setCustomId("farme_public_negar")
+    .setLabel("Negar")
+    .setStyle(ButtonStyle.Danger)
+    .setDisabled(disabled);
 
-  let aplicado = 0;
-  let carry = 0;
-
-  if (tipo === "papel") {
-    const restante = Math.max(0, 100 - papelHoje);
-    aplicado = Math.min(quantidade, restante);
-
-    let overflow = Math.max(0, quantidade - aplicado);
-
-    const paga = Math.min(overflow, papelDebt);
-    papelDebt -= paga;
-    overflow -= paga;
-
-    carry = overflow;
-
-    papelHoje += aplicado;
-    papelCarry += carry;
-
-    await pool.query(
-      `UPDATE usuarios SET "papelHoje"=$1,"papelCarry"=$2,"papelDebt"=$3 WHERE "guildId"=$4 AND "userId"=$5`,
-      [papelHoje, papelCarry, papelDebt, guildId, userId]
-    );
-  } else if (tipo === "sementes") {
-    const restante = Math.max(0, 100 - sementesHoje);
-    aplicado = Math.min(quantidade, restante);
-
-    let overflow = Math.max(0, quantidade - aplicado);
-
-    const paga = Math.min(overflow, sementesDebt);
-    sementesDebt -= paga;
-    overflow -= paga;
-
-    carry = overflow;
-
-    sementesHoje += aplicado;
-    sementesCarry += carry;
-
-    await pool.query(
-      `UPDATE usuarios SET "sementesHoje"=$1,"sementesCarry"=$2,"sementesDebt"=$3 WHERE "guildId"=$4 AND "userId"=$5`,
-      [sementesHoje, sementesCarry, sementesDebt, guildId, userId]
-    );
-  } else {
-    throw new Error("tipo inválido");
-  }
-
-  const u1 = await pool.query(`SELECT * FROM usuarios WHERE "guildId"=$1 AND "userId"=$2`, [guildId, userId]);
-  return { user: u1.rows[0], aplicado, carry };
+  return new ActionRowBuilder().addComponents(approve, deny);
 }
 
-// ==========================
-// ✏️ EDITAR / DESFAZER (REPLY) — SÓ 00
-// ==========================
-function calcDebtPaid(quantidade, aplicado, carry) {
-  const q = Number(quantidade || 0);
-  const a = Number(aplicado || 0);
-  const c = Number(carry || 0);
-  return Math.max(0, (q - a) - c);
+function staffPanelButtons(requestId, canAdjust) {
+  const close = new ButtonBuilder()
+    .setCustomId(`farme_staff_fechar:${requestId}`)
+    .setLabel("Fechar Canal")
+    .setStyle(ButtonStyle.Secondary);
+
+  const end = new ButtonBuilder()
+    .setCustomId(`farme_staff_encerrar:${requestId}`)
+    .setLabel("Encerrar (Deletar)")
+    .setStyle(ButtonStyle.Danger);
+
+  const adjust = new ButtonBuilder()
+    .setCustomId(`farme_staff_ajustar:${requestId}`)
+    .setLabel("Ajustar (00)")
+    .setStyle(ButtonStyle.Primary)
+    .setDisabled(!canAdjust);
+
+  return new ActionRowBuilder().addComponents(close, end, adjust);
 }
 
-async function getHistoricoAprovadoByMsgId(guildId, msgId) {
+function getHelpEmbedFor(member, cfg) {
+  const is_00 = is00(member, cfg);
+  const is_staff = isStaff(member, cfg);
+
+  const memberCmds = [
+    { name: "/farme", desc: "Abrir menu e criar/abrir canal privado do item." },
+    { name: "/enviarfarme", desc: "Enviar farme (quantidade + print) para aprovação." },
+    { name: "/meusfarmes", desc: "Ver seus totais aprovados por item." },
+    { name: "/ranking", desc: "Ver ranking geral do servidor." },
+    { name: "/ajuda", desc: "Ver os comandos disponíveis." },
+  ];
+
+  const gerenteCmds = [
+    { name: "/gerenciarcanal", desc: "Painel staff para fechar/encerrar o canal atual." },
+    { name: "/testardiario", desc: "Tabela staff por cargos e por data." },
+  ];
+
+  const extra00Cmds = [
+    { name: "Ajustar (00)", desc: "No painel do canal, botão Ajustar (00) após aprovar/negar." },
+  ];
+
+  const fmt = (arr) => arr.map((c) => `• **${c.name}** — ${c.desc}`).join("\n");
+
+  return new EmbedBuilder()
+    .setTitle(`🧭 Ajuda do Bot — ${cfg.NAME}`)
+    .setDescription(is_00 ? "Você é **00**." : is_staff ? "Você é **Gerente/Staff**." : "Você é **Membro**.")
+    .addFields({ name: "👤 Comandos de Membro", value: fmt(memberCmds), inline: false })
+    .addFields(...(is_staff ? [{ name: "🛡️ Comandos de Staff", value: fmt(gerenteCmds), inline: false }] : []))
+    .addFields(...(is_00 ? [{ name: "👑 Extras do 00", value: fmt(extra00Cmds), inline: false }] : []))
+    .setTimestamp(new Date());
+}
+
+// ======================================================
+// 🧾 DB HELPERS
+// ======================================================
+async function getRequestByRequestId(guildId, requestId) {
   const { rows } = await pool.query(
-    `SELECT *
-     FROM historico
-     WHERE "guildId"=$1 AND "msgId"=$2 AND status='APROVADO'
-     ORDER BY id DESC
-     LIMIT 1`,
-    [guildId, msgId]
+    `SELECT * FROM farme_requests WHERE "guildId"=$1 AND "requestId"=$2 LIMIT 1`,
+    [guildId, requestId]
   );
   return rows[0] || null;
 }
 
-async function getAprovadosUserTipoDiaForUpdate(dbClient, guildId, userId, tipo, dia) {
-  const { rows } = await dbClient.query(
-    `SELECT id, "msgId", quantidade, aplicado, carry, created_at
-     FROM historico
-     WHERE "guildId"=$1 AND "userId"=$2 AND tipo=$3 AND dia=$4 AND status='APROVADO'
-     ORDER BY created_at ASC, id ASC
-     FOR UPDATE`,
-    [guildId, userId, tipo, dia]
+async function getLatestRequestByChannel(guildId, channelId) {
+  const { rows } = await pool.query(
+    `SELECT * FROM farme_requests
+     WHERE "guildId"=$1 AND "channelId"=$2
+     ORDER BY "createdAt" DESC, id DESC
+     LIMIT 1`,
+    [guildId, channelId]
   );
-  return rows;
+  return rows[0] || null;
 }
 
-async function recalcTipoDia(dbClient, guildId, userId, tipo, dia, editedRowId, newQuantidade) {
-  const userRes = await dbClient.query(
-    `SELECT *
-     FROM usuarios
-     WHERE "guildId"=$1 AND "userId"=$2
-     FOR UPDATE`,
+async function upsertChannelMap(guildId, userId, itemValue, channelId) {
+  await pool.query(
+    `INSERT INTO farme_channels ("guildId","userId","itemValue","channelId")
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT ("guildId","userId","itemValue")
+     DO UPDATE SET "channelId"=EXCLUDED."channelId"`,
+    [guildId, userId, itemValue, channelId]
+  );
+}
+
+async function getMappedChannelId(guildId, userId, itemValue) {
+  const { rows } = await pool.query(
+    `SELECT "channelId" FROM farme_channels WHERE "guildId"=$1 AND "userId"=$2 AND "itemValue"=$3 LIMIT 1`,
+    [guildId, userId, itemValue]
+  );
+  return rows[0]?.channelId || null;
+}
+
+async function setCooldown(guildId, userId) {
+  await pool.query(
+    `INSERT INTO farme_cooldowns ("guildId","userId","lastAt")
+     VALUES ($1,$2,NOW())
+     ON CONFLICT ("guildId","userId")
+     DO UPDATE SET "lastAt"=NOW()`,
     [guildId, userId]
   );
-  const u = userRes.rows[0];
-  if (!u) throw new Error("Usuário não encontrado em usuarios");
+}
 
-  const rows = await getAprovadosUserTipoDiaForUpdate(dbClient, guildId, userId, tipo, dia);
-  if (!rows.length) return;
+async function getCooldownRemaining(guildId, userId) {
+  const { rows } = await pool.query(
+    `SELECT EXTRACT(EPOCH FROM "lastAt") AS epoch
+     FROM farme_cooldowns
+     WHERE "guildId"=$1 AND "userId"=$2
+     LIMIT 1`,
+    [guildId, userId]
+  );
 
-  let papelHoje = Number(u.papelHoje || 0);
-  let sementesHoje = Number(u.sementesHoje || 0);
-  let papelCarry = Number(u.papelCarry || 0);
-  let sementesCarry = Number(u.sementesCarry || 0);
-  let papelDebt = Number(u.papelDebt || 0);
-  let sementesDebt = Number(u.sementesDebt || 0);
+  const epoch = Number(rows[0]?.epoch || 0);
+  if (!epoch) return 0;
 
-  // reverte todas as aplicações do tipo no dia
-  for (const r of rows) {
-    const debtPaid = calcDebtPaid(r.quantidade, r.aplicado, r.carry);
+  const elapsed = Date.now() / 1000 - epoch;
+  const remaining = COOLDOWN_SECONDS - elapsed;
+  return remaining > 0 ? Math.ceil(remaining) : 0;
+}
 
-    if (tipo === "papel") {
-      papelHoje = Math.max(0, papelHoje - Number(r.aplicado || 0));
-      papelCarry = Math.max(0, papelCarry - Number(r.carry || 0));
-      papelDebt = Math.max(0, papelDebt + debtPaid);
-    } else {
-      sementesHoje = Math.max(0, sementesHoje - Number(r.aplicado || 0));
-      sementesCarry = Math.max(0, sementesCarry - Number(r.carry || 0));
-      sementesDebt = Math.max(0, sementesDebt + debtPaid);
-    }
-  }
-
-  // atualiza quantidade do registro editado
-  await dbClient.query(`UPDATE historico SET quantidade=$1 WHERE id=$2`, [Number(newQuantidade), editedRowId]);
-
-  // reaplica em ordem cronológica
-  const rows2 = await getAprovadosUserTipoDiaForUpdate(dbClient, guildId, userId, tipo, dia);
-
-  for (const r of rows2) {
-    const q = Number(r.quantidade || 0);
-    let aplicado = 0;
-    let carry = 0;
-
-    if (tipo === "papel") {
-      const restante = Math.max(0, 100 - papelHoje);
-      aplicado = Math.min(q, restante);
-
-      let overflow = Math.max(0, q - aplicado);
-      const paga = Math.min(overflow, papelDebt);
-      papelDebt -= paga;
-      overflow -= paga;
-
-      carry = overflow;
-
-      papelHoje += aplicado;
-      papelCarry += carry;
-    } else {
-      const restante = Math.max(0, 100 - sementesHoje);
-      aplicado = Math.min(q, restante);
-
-      let overflow = Math.max(0, q - aplicado);
-      const paga = Math.min(overflow, sementesDebt);
-      sementesDebt -= paga;
-      overflow -= paga;
-
-      carry = overflow;
-
-      sementesHoje += aplicado;
-      sementesCarry += carry;
-    }
-
-    await dbClient.query(`UPDATE historico SET aplicado=$1, carry=$2 WHERE id=$3`, [aplicado, carry, r.id]);
-  }
-
-  await dbClient.query(
-    `UPDATE usuarios
-     SET "papelHoje"=$1, "sementesHoje"=$2, "papelCarry"=$3, "sementesCarry"=$4, "papelDebt"=$5, "sementesDebt"=$6
-     WHERE "guildId"=$7 AND "userId"=$8`,
-    [papelHoje, sementesHoje, papelCarry, sementesCarry, papelDebt, sementesDebt, guildId, userId]
+async function addTotals(guildId, userId, itemValue, quantidade) {
+  await pool.query(
+    `INSERT INTO farme_totals ("guildId","userId","itemValue",total)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT ("guildId","userId","itemValue")
+     DO UPDATE SET total = GREATEST(0, farme_totals.total + EXCLUDED.total)`,
+    [guildId, userId, itemValue, quantidade]
   );
 }
 
-// ==========================
-// ✅ AJUSTAR (SÓ 00) — sem reply
-// ==========================
-async function applyAdjustDirect(guildId, userId, tipo, delta) {
-  const u0 = await rollToToday(guildId, userId);
-  if (!u0) throw new Error("Usuário inválido");
-
-  let papelHoje = Number(u0.papelHoje || 0);
-  let sementesHoje = Number(u0.sementesHoje || 0);
-  let papelCarry = Number(u0.papelCarry || 0);
-  let sementesCarry = Number(u0.sementesCarry || 0);
-  let papelDebt = Number(u0.papelDebt || 0);
-  let sementesDebt = Number(u0.sementesDebt || 0);
-
-  const d = Number(delta || 0);
-  if (!d) return { before: u0, after: u0 };
-
-  if (tipo === "papel") {
-    if (d > 0) {
-      const restante = Math.max(0, 100 - papelHoje);
-      const aplicado = Math.min(d, restante);
-      const overflow = Math.max(0, d - aplicado);
-      papelHoje += aplicado;
-      papelCarry += overflow;
-    } else {
-      let remove = Math.abs(d);
-      const takeCarry = Math.min(remove, papelCarry);
-      papelCarry -= takeCarry;
-      remove -= takeCarry;
-
-      const takeHoje = Math.min(remove, papelHoje);
-      papelHoje -= takeHoje;
-      remove -= takeHoje;
-    }
-
-    await pool.query(
-      `UPDATE usuarios SET "papelHoje"=$1,"papelCarry"=$2,"papelDebt"=$3 WHERE "guildId"=$4 AND "userId"=$5`,
-      [papelHoje, papelCarry, papelDebt, guildId, userId]
-    );
-  } else if (tipo === "sementes") {
-    if (d > 0) {
-      const restante = Math.max(0, 100 - sementesHoje);
-      const aplicado = Math.min(d, restante);
-      const overflow = Math.max(0, d - aplicado);
-      sementesHoje += aplicado;
-      sementesCarry += overflow;
-    } else {
-      let remove = Math.abs(d);
-      const takeCarry = Math.min(remove, sementesCarry);
-      sementesCarry -= takeCarry;
-      remove -= takeCarry;
-
-      const takeHoje = Math.min(remove, sementesHoje);
-      sementesHoje -= takeHoje;
-      remove -= takeHoje;
-    }
-
-    await pool.query(
-      `UPDATE usuarios SET "sementesHoje"=$1,"sementesCarry"=$2,"sementesDebt"=$3 WHERE "guildId"=$4 AND "userId"=$5`,
-      [sementesHoje, sementesCarry, sementesDebt, guildId, userId]
-    );
-  } else {
-    throw new Error("tipo inválido");
-  }
-
-  const { rows } = await pool.query(`SELECT * FROM usuarios WHERE "guildId"=$1 AND "userId"=$2`, [guildId, userId]);
-  return { before: u0, after: rows[0] || u0 };
+async function markApprovedToday(guildId, userId, itemValue, quantidade) {
+  const dk = dateKeyNow();
+  await pool.query(
+    `INSERT INTO farme_daily ("guildId","dateKey","userId","itemValue",total)
+     VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT ("guildId","dateKey","userId","itemValue")
+     DO UPDATE SET total = farme_daily.total + EXCLUDED.total`,
+    [guildId, dk, userId, itemValue, quantidade]
+  );
 }
 
-// ==========================
-// ✅ HISTÓRICO
-// ==========================
-function statusEmoji(status) {
-  const s = String(status || "").toUpperCase();
-  if (s === "APROVADO") return "✅";
-  if (s === "NEGADO") return "❌";
-  if (s === "AJUSTE") return "👑";
-  if (s === "EDITADO") return "✏️";
-  if (s === "DESFEITO") return "🔁";
-  return "📌";
+async function getApprovedCount(guildId, dateKey, userId, itemValue) {
+  const { rows } = await pool.query(
+    `SELECT total FROM farme_daily
+     WHERE "guildId"=$1 AND "dateKey"=$2 AND "userId"=$3 AND "itemValue"=$4
+     LIMIT 1`,
+    [guildId, dateKey, userId, itemValue]
+  );
+  return Number(rows[0]?.total || 0);
 }
 
-async function getHistoricoUser(guildId, userId, limit = 30, opts = {}) {
-  const lim = Math.max(1, Math.min(100, Number(limit || 30)));
-  const dia = opts?.dia || null;
-  const tipo = opts?.tipo || null;
+async function missStreakUntil(guildId, dateKey, userId, itemValue, maxLookbackDays = 120) {
+  const base = DateTime.fromISO(dateKey, { zone: TZ });
+  if (!base.isValid) return 0;
 
-  const params = [guildId, userId];
-  let where = `WHERE "guildId"=$1 AND "userId"=$2`;
-  let p = 3;
+  const todayCount = await getApprovedCount(guildId, dateKey, userId, itemValue);
+  if (todayCount >= 1) return 0;
 
-  if (dia) {
-    where += ` AND dia=$${p++}`;
-    params.push(dia);
+  let streak = 0;
+  for (let i = 0; i < maxLookbackDays; i++) {
+    const dk = base.minus({ days: i }).toISODate();
+    const n = await getApprovedCount(guildId, dk, userId, itemValue);
+    if (n >= 1) break;
+    streak++;
   }
-  if (tipo) {
-    where += ` AND tipo=$${p++}`;
-    params.push(tipo);
+  return streak;
+}
+
+async function getUserTotals(guildId, userId) {
+  const { rows } = await pool.query(
+    `SELECT "itemValue", total
+     FROM farme_totals
+     WHERE "guildId"=$1 AND "userId"=$2`,
+    [guildId, userId]
+  );
+
+  const items = {};
+  let total = 0;
+
+  for (const r of rows) {
+    items[r.itemValue] = Number(r.total || 0);
+    total += Number(r.total || 0);
   }
 
-  params.push(lim);
+  return { total, items };
+}
 
+async function getRanking(guildId, limit = 10) {
   const { rows } = await pool.query(
     `
-    SELECT tipo, quantidade, status, data, dia, "msgId", "gerenteId", aplicado, carry, created_at
-    FROM historico
-    ${where}
-    ORDER BY created_at DESC, id DESC
-    LIMIT $${p}
+    SELECT "userId", COALESCE(SUM(total),0)::int AS total
+    FROM farme_totals
+    WHERE "guildId"=$1
+    GROUP BY "userId"
+    HAVING COALESCE(SUM(total),0) > 0
+    ORDER BY total DESC
+    LIMIT $2
     `,
-    params
+    [guildId, limit]
   );
-
   return rows;
 }
 
-// ==========================
-// ✅ FECHAMENTO DIÁRIO + DM 00:05 + AVISO NO CANAL
-// ==========================
-async function getConfig(chave, defaultValue = null) {
-  const { rows } = await pool.query(`SELECT valor FROM bot_config WHERE chave=$1`, [chave]);
-  return rows[0]?.valor ?? defaultValue;
-}
-async function setConfig(chave, valor) {
+async function setFixedMessage(guildId, chave, valor) {
   await pool.query(
-    `INSERT INTO bot_config (chave, valor) VALUES ($1,$2)
-     ON CONFLICT (chave) DO UPDATE SET valor=EXCLUDED.valor`,
-    [chave, String(valor)]
+    `INSERT INTO farme_fixed_messages ("guildId",chave,valor)
+     VALUES ($1,$2,$3)
+     ON CONFLICT ("guildId",chave)
+     DO UPDATE SET valor=EXCLUDED.valor`,
+    [guildId, chave, valor]
   );
 }
 
-function chunkLines(lines, maxLen = 3500) {
-  const chunks = [];
-  let cur = "";
-  for (const line of lines) {
-    if ((cur + "\n" + line).length > maxLen) {
-      chunks.push(cur);
-      cur = line;
-    } else {
-      cur = cur ? cur + "\n" + line : line;
-    }
-  }
-  if (cur) chunks.push(cur);
-  return chunks;
+async function getFixedMessage(guildId, chave) {
+  const { rows } = await pool.query(
+    `SELECT valor FROM farme_fixed_messages WHERE "guildId"=$1 AND chave=$2 LIMIT 1`,
+    [guildId, chave]
+  );
+  return rows[0]?.valor || null;
 }
 
-async function runDailyAuditOnce() {
-  const now = new Date();
-  if (!(now.getHours() === DAILY_AUDIT_HOUR && now.getMinutes() === DAILY_AUDIT_MIN)) return;
+async function sendLog(guild, content, embed) {
+  const cfg = getCfg(guild.id);
+  if (!cfg?.LOG_CHANNEL_ID) return;
 
-  const today = todayKey();
-  const diaAuditado = yesterdayKey();
+  const logChannel = await guild.channels.fetch(cfg.LOG_CHANNEL_ID).catch(() => null);
+  if (logChannel && logChannel.isTextBased()) {
+    await logChannel.send({ content, embeds: embed ? [embed] : [] }).catch(() => null);
+  }
+}
+
+async function sendReport(guild, content, embeds = []) {
+  const cfg = getCfg(guild.id);
+  if (!cfg?.REPORT_CHANNEL_ID) return;
+
+  const ch = await guild.channels.fetch(cfg.REPORT_CHANNEL_ID).catch(() => null);
+  if (ch && ch.isTextBased()) {
+    await ch.send({ content, embeds }).catch(() => null);
+  }
+}
+
+async function sendStaffTable(guild, content, embeds = []) {
+  const cfg = getCfg(guild.id);
+  if (!cfg?.STAFF_TABLE_CHANNEL_ID) return false;
+
+  const ch = await guild.channels.fetch(cfg.STAFF_TABLE_CHANNEL_ID).catch(() => null);
+  if (ch && ch.isTextBased()) {
+    await ch.send({ content, embeds }).catch(() => null);
+    return true;
+  }
+  return false;
+}
+
+async function safeDailyDM(userId, text) {
+  const user = await client.users.fetch(userId).catch(() => null);
+  if (!user) return;
+  await user.send(text).catch(() => null);
+}
+
+async function safeNotifyDM(userId, text) {
+  const user = await client.users.fetch(userId).catch(() => null);
+  if (!user) return;
+  await user.send(text).catch(() => null);
+}
+
+async function cleanupDB() {
+  try {
+    const now = Date.now();
+    const closedCutoff = new Date(now - daysToMs(DELETE_CLOSED_OLDER_THAN_DAYS));
+    const pendingCutoff = new Date(now - daysToMs(DELETE_PENDING_OLDER_THAN_DAYS));
+
+    const r1 = await pool.query(
+      `DELETE FROM farme_requests
+       WHERE status='closed' AND "createdAt" < $1`,
+      [closedCutoff]
+    );
+
+    const r2 = await pool.query(
+      `DELETE FROM farme_requests
+       WHERE status='pending' AND "createdAt" < $1`,
+      [pendingCutoff]
+    );
+
+    const removed = Number(r1.rowCount || 0) + Number(r2.rowCount || 0);
+    if (removed > 0) console.log(`🧹 Cleanup DB: removi ${removed} requests antigos.`);
+  } catch (e) {
+    console.error("❌ Cleanup falhou:", e);
+  }
+}
+
+// ======================================================
+// 📌 LEADERBOARD FIXA
+// ======================================================
+function buildLeaderboardEmbed(guild, rows) {
+  const desc = rows.length
+    ? rows
+        .map((e, i) => {
+          const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "🔸";
+          return `${medal} **${i + 1}.** <@${e.userId}> — **${e.total}**`;
+        })
+        .join("\n")
+    : "Ainda não tem farmes aprovados.";
+
+  return new EmbedBuilder()
+    .setTitle("🏆 Leaderboard de Farmes (fixa)")
+    .setDescription(desc)
+    .setFooter({ text: `Atualizado automaticamente • Servidor: ${guild.name}` })
+    .setTimestamp(new Date());
+}
+
+async function updateLeaderboardFixed(guild) {
+  const cfg = getCfg(guild.id);
+  if (!cfg?.LEADERBOARD_CHANNEL_ID) return;
+
+  const channel = await guild.channels.fetch(cfg.LEADERBOARD_CHANNEL_ID).catch(() => null);
+  if (!channel || !channel.isTextBased()) return;
+
+  const rows = await getRanking(guild.id, 10);
+  const embed = buildLeaderboardEmbed(guild, rows);
+
+  const existingId = await getFixedMessage(guild.id, "leaderboardMessageId");
+  if (existingId) {
+    const msg = await channel.messages.fetch(existingId).catch(() => null);
+    if (msg) {
+      await msg.edit({ content: "📌 **Ranking fixo (auto)**", embeds: [embed] }).catch(() => null);
+      return;
+    }
+  }
+
+  const created = await channel.send({ content: "📌 **Ranking fixo (auto)**", embeds: [embed] }).catch(() => null);
+  if (created) {
+    await setFixedMessage(guild.id, "leaderboardMessageId", created.id);
+  }
+}
+
+// ======================================================
+// 📊 PRODUTIVIDADE FIXA (1 msg por membro)
+// ======================================================
+function buildProductivityEmbedFor(guild, userId, totals) {
+  const items = FARME_OPTIONS
+    .map((o) => ({ label: o.label, value: o.value, n: totals.items[o.value] || 0 }))
+    .filter((x) => x.n > 0);
+
+  const lines = items.length ? items.map((x) => `• **${x.label}:** ${x.n}`).join("\n") : "— (ainda não tem farmes aprovados)";
+
+  return new EmbedBuilder()
+    .setTitle("📊 Painel de Produtividade")
+    .setDescription(`👤 <@${userId}>\n\n${lines}`)
+    .addFields({ name: "🏁 Total", value: String(totals.total || 0), inline: true })
+    .setFooter({ text: `Atualiza quando aprova/ajusta • ${guild.name}` })
+    .setTimestamp(new Date());
+}
+
+async function updateProductivityPanelFor(guild, userId) {
+  const cfg = getCfg(guild.id);
+  if (!cfg?.PRODUCTIVITY_CHANNEL_ID) return;
+
+  const channel = await guild.channels.fetch(cfg.PRODUCTIVITY_CHANNEL_ID).catch(() => null);
+  if (!channel || !channel.isTextBased()) return;
+
+  const totals = await getUserTotals(guild.id, userId);
+  const embed = buildProductivityEmbedFor(guild, userId, totals);
+
+  const key = `productivity:${userId}`;
+  const existingId = await getFixedMessage(guild.id, key);
+
+  if (existingId) {
+    const msg = await channel.messages.fetch(existingId).catch(() => null);
+    if (msg) {
+      await msg.edit({ embeds: [embed] }).catch(() => null);
+      return;
+    }
+  }
+
+  const created = await channel.send({ embeds: [embed] }).catch(() => null);
+  if (created) {
+    await setFixedMessage(guild.id, key, created.id);
+  }
+}
+
+async function updatePanelsAfterChange(guild, userId) {
+  await updateLeaderboardFixed(guild).catch(() => null);
+  await updateProductivityPanelFor(guild, userId).catch(() => null);
+}
+
+// ======================================================
+// 📅 RELATÓRIO DIÁRIO
+// ======================================================
+async function buildStaffRow(guildId, userId, displayName, dateKey) {
+  const doneParts = [];
+  const streakParts = [];
+
+  for (const o of FARME_OPTIONS) {
+    const done = await getApprovedCount(guildId, dateKey, userId, o.value);
+    const streak = await missStreakUntil(guildId, dateKey, userId, o.value);
+    doneParts.push(`${o.label}: ${done}`);
+    streakParts.push(`${o.label}: ${streak}`);
+  }
+
+  return (
+    `👤 **${displayName}** (<@${userId}>)\n` +
+    `✅ **Rotas no dia:** ${doneParts.join(" | ")}\n` +
+    `📌 **Rota completa:** ${streakParts.join(" | ")}`
+  );
+}
+
+async function runDailyAuditAndReport() {
+  const dk = DateTime.now().setZone(TZ).minus({ days: 1 }).toISODate();
 
   for (const guild of client.guilds.cache.values()) {
     const cfg = getCfg(guild.id);
     if (!cfg) continue;
 
-    const lastDoneKey = `${guild.id}:last_daily_audit_day`;
-    const lastDone = await getConfig(lastDoneKey, "");
-    if (lastDone === today) continue;
-
-    const { rows: users } = await pool.query(`SELECT "userId" FROM usuarios WHERE "guildId"=$1`, [guild.id]);
-    const faltaram = [];
-
-    for (const u of users) {
-      const totals = await getTotaisDia(guild.id, u.userId, diaAuditado);
-      const faltouP = Math.max(0, META_DIARIA - totals.papel);
-      const faltouS = Math.max(0, META_DIARIA - totals.sementes);
-
-      if (faltouP > 0 || faltouS > 0) {
-        await pool.query(
-          `UPDATE usuarios
-           SET "papelDebt" = COALESCE("papelDebt",0) + $1,
-               "sementesDebt" = COALESCE("sementesDebt",0) + $2
-           WHERE "guildId"=$3 AND "userId"=$4`,
-          [faltouP, faltouS, guild.id, u.userId]
-        );
-
-        faltaram.push({
-          userId: u.userId,
-          papel_total: totals.papel,
-          sementes_total: totals.sementes,
-          faltouP,
-          faltouS,
-        });
-      }
+    for (const userId of cfg.DAILY_DM_WHITELIST || []) {
+      await safeDailyDM(
+        userId,
+        `📅 **Meta diária (${dk})**\n\n📌 Use **/testardiario** para ver a tabela completa no canal staff.`
+      );
     }
 
-    // 🔔 DM automática + 📢 aviso no canal (se configurado)
-    for (const r of faltaram) {
-      try {
-        const member = await guild.members.fetch(r.userId).catch(() => null);
-        if (!member || member.user.bot) continue;
-
-        const totalFaltou = Number(r.faltouP || 0) + Number(r.faltouS || 0);
-
-        const embedDM = new EmbedBuilder()
-          .setColor("#2b2d31")
-          .setTitle("⚠️ Meta diária não atingida")
-          .setDescription(
-            `🏷️ Servidor: **${cfg.NAME}**\n` +
-              `📅 Dia analisado: **${diaAuditado}**\n\n` +
-              `📄 Papel: **${r.papel_total}/${META_DIARIA}**\n` +
-              `🌱 Sementes: **${r.sementes_total}/${META_DIARIA}**\n\n` +
-              `❌ Faltou:\n` +
-              `• Papel: **${r.faltouP}**\n` +
-              `• Sementes: **${r.faltouS}**\n\n` +
-              `📦 Total faltante: **${totalFaltou}**\n\n` +
-              `Essa quantidade foi adicionada ao seu **Farme atrasado**.`
-          )
-          .setTimestamp();
-
-        const thumb = getThumb(client);
-        if (thumb) embedDM.setThumbnail(thumb);
-
-        // ✅ manda DM
-        await member.send({ embeds: [embedDM] }).catch(() => null);
-
-        // ✅ dados atuais do banco (debt total + lastSeenAt)
-        const uRes = await pool.query(
-          `SELECT "papelDebt","sementesDebt","lastSeenAt"
-           FROM usuarios
-           WHERE "guildId"=$1 AND "userId"=$2
-           LIMIT 1`,
-          [guild.id, member.user.id]
-        );
-        const uRow = uRes.rows[0] || {};
-        const papelDebtNow = Number(uRow.papelDebt || 0);
-        const sementesDebtNow = Number(uRow.sementesDebt || 0);
-        const totalDebtNow = papelDebtNow + sementesDebtNow;
-
-        const lastSeenTxt = uRow.lastSeenAt
-          ? `<t:${Math.floor(new Date(uRow.lastSeenAt).getTime() / 1000)}:R>`
-          : "Sem registro";
-
-        const cargoAtual = getHighestRoleName(member);
-
-        // ✅ manda aviso no canal configurado (NOVA ORDEM)
-        const avisoChannel = getDebitAlertChannel(guild);
-        if (avisoChannel) {
-          const embedAviso = new EmbedBuilder()
-            .setColor("#ff4d4d")
-            .setTitle("🚨 Membro ficou devendo meta")
-            .setDescription(
-              `👤 Membro: **${member.user.tag}**\n` +
-                `🆔 ID: **${member.user.id}**\n` +
-                `🎭 Cargo atual: **${cargoAtual}**\n` +
-                `🕒 Último visto (pelo bot): **${lastSeenTxt}**\n\n` +
-                `📅 Dia auditado: **${diaAuditado}**\n\n` +
-                `❌ Faltou no dia:\n` +
-                `• Papel: **${r.faltouP}**\n` +
-                `• Sementes: **${r.faltouS}**\n` +
-                `📦 Total faltante: **${totalFaltou}**\n\n` +
-                `📌 Dívida acumulada agora:\n` +
-                `• Papel: **${papelDebtNow}**\n` +
-                `• Sementes: **${sementesDebtNow}**\n` +
-                `📦 Total acumulado: **${totalDebtNow}**`
-            )
-            .setTimestamp();
-
-          if (thumb) embedAviso.setThumbnail(thumb);
-          await avisoChannel.send({ embeds: [embedAviso] }).catch(() => null);
-        }
-      } catch (e) {}
-    }
-
-    const logChannel = getLogChannel(guild);
-    if (!logChannel) {
-      await setConfig(lastDoneKey, today);
-      continue;
-    }
-
-    const thumb = getThumb(client);
-
-    if (!faltaram.length) {
-      const embed = new EmbedBuilder()
-        .setColor("#2b2d31")
-        .setTitle(`✅ Fechamento diário (META) — ${cfg.NAME}`)
-        .setDescription(`📅 Dia auditado: **${diaAuditado}**\n\n✅ Ninguém ficou abaixo da meta (${META_DIARIA}).`)
-        .setTimestamp();
-      if (thumb) embed.setThumbnail(thumb);
-      await logChannel.send({ embeds: [embed] }).catch(() => null);
-    } else {
-      const lines = faltaram.map((r) => {
-        const pTxt =
-          r.faltouP > 0 ? `❌ ${r.papel_total}/${META_DIARIA} (faltou ${r.faltouP})` : `✅ ${r.papel_total}/${META_DIARIA}`;
-        const sTxt =
-          r.faltouS > 0 ? `❌ ${r.sementes_total}/${META_DIARIA} (faltou ${r.faltouS})` : `✅ ${r.sementes_total}/${META_DIARIA}`;
-        return `• <@${r.userId}> — 📄 ${pTxt} | 🌱 ${sTxt}`;
-      });
-
-      for (const chunk of chunkLines(lines)) {
-        const embed = new EmbedBuilder()
-          .setColor("#2b2d31")
-          .setTitle(`⚠️ Fechamento diário: NÃO bateu meta — ${cfg.NAME}`)
-          .setDescription(
-            `📅 Dia auditado: **${diaAuditado}**\n🎯 Meta diária: **${META_DIARIA}**\n📌 A diferença foi somada no **Farme atrasado**.\n\n${chunk}`
-          )
-          .setTimestamp();
-        if (thumb) embed.setThumbnail(thumb);
-        await logChannel.send({ embeds: [embed] }).catch(() => null);
-      }
-    }
-
-    await setConfig(lastDoneKey, today);
+    await sendReport(guild, `✅ Relatório diário gerado (${dk}).`);
   }
 }
 
-async function startDailyAuditLoop() {
-  setInterval(() => runDailyAuditOnce().catch((e) => console.error("Erro runDailyAuditOnce:", e)), 30_000);
-}
+// ======================================================
+// 🛠️ SLASH COMMANDS
+// ======================================================
+const commands = [
+  new SlashCommandBuilder().setName("farme").setDescription("Abra o menu e crie seu canal privado de farme."),
 
-// ==========================
-// 📩 MESSAGE
-// ==========================
-client.on("messageCreate", async (message) => {
+  new SlashCommandBuilder()
+    .setName("enviarfarme")
+    .setDescription("Enviar seu farme (quantidade + print) para aprovação.")
+    .addIntegerOption((opt) =>
+      opt.setName("quantidade").setDescription("Quantidade farmada").setRequired(true).setMinValue(1)
+    )
+    .addAttachmentOption((opt) =>
+      opt.setName("print").setDescription("Envie o print/anexo como prova").setRequired(true)
+    ),
+
+  new SlashCommandBuilder().setName("meusfarmes").setDescription("Mostra seus totais aprovados por item."),
+
+  new SlashCommandBuilder().setName("ranking").setDescription("Mostra o ranking geral de farmes (top 10)."),
+
+  new SlashCommandBuilder().setName("gerenciarcanal").setDescription("(Staff) Abre painel para Fechar/Encerrar/Ajustar o canal atual."),
+
+  new SlashCommandBuilder()
+    .setName("testardiario")
+    .setDescription("(Staff) Posta no canal staff a tabela por cargos.")
+    .addStringOption((opt) =>
+      opt
+        .setName("dia")
+        .setDescription('Escolha: "hoje", "ontem" ou "data"')
+        .setRequired(true)
+        .addChoices(
+          { name: "hoje", value: "hoje" },
+          { name: "ontem", value: "ontem" },
+          { name: "data (YYYY-MM-DD)", value: "data" }
+        )
+    )
+    .addStringOption((opt) =>
+      opt.setName("data").setDescription('Se "dia" = data, coloque aqui: YYYY-MM-DD').setRequired(false)
+    ),
+
+  new SlashCommandBuilder().setName("ajuda").setDescription("Mostra os comandos disponíveis para o seu cargo."),
+].map((c) => c.toJSON());
+
+async function registerCommands() {
   try {
-    if (!message.guild || message.author.bot) return;
+    const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
-    const cfg = getCfg(message.guild.id);
-    if (!cfg) return;
-
-    console.log("[MSG]", message.guild.id, message.channel.id, message.author.tag, JSON.stringify(message.content));
-
-    // ✅ garante usuário e marca "último visto"
-    await ensureUser(message.guild.id, message.author.id);
-    await pool.query(
-      `UPDATE usuarios SET "lastSeenAt"=NOW()
-       WHERE "guildId"=$1 AND "userId"=$2`,
-      [message.guild.id, message.author.id]
-    );
-
-    const member = message.member || (await message.guild.members.fetch(message.author.id));
-    const isGerente = member.roles.cache.has(cfg.GERENTE_ROLE_ID);
-    const is00 = member.roles.cache.has(cfg.ROLE_00_ID);
-
-    const content = (message.content || "").trim();
-    const lower = content.toLowerCase();
-
-    // ==========================
-    // 📖 !ajuda
-    // ==========================
-    if (lower === "!ajuda") {
-      let desc = "";
-
-      desc += `👤 **Membro**\n`;
-      desc += `\`!status\` — ver seu status do dia\n`;
-      desc += `\`!farme papel X\` / \`!farme sementes X\` — enviar farme com print (no canal correto)\n`;
-
-      if (isGerente || is00) {
-        desc += `\n🛡️ **Gerente / 00**\n`;
-        desc += `\`!tabela\` / \`!tabela ontem\` — ranking de aprovados\n`;
-        desc += `\`!relatorio\` — relatório geral do dia\n`;
-        desc += `\`!naofarmou\` / \`!naofarmou @cargo\` — lista quem não teve farme aprovado\n`;
-      }
-
-      if (is00) {
-        desc += `\n👑 **Somente 00**\n`;
-        desc += `\`!historico @membro\` — histórico do membro (últimos registros)\n`;
-        desc += `\n*(reply na mensagem aprovada do bot)*\n`;
-        desc += `\`!editar 10\` — corrige a quantidade aprovada\n`;
-        desc += `\`!desfazer\` — volta o aprovado pra 0\n`;
-        desc += `\n*(sem reply — ajuste administrativo direto no saldo)*\n`;
-        desc += `\`!ajustar @membro papel +80\`\n`;
-        desc += `\`!ajustar @membro papel -120\`\n`;
-        desc += `\`!ajustar @membro sementes +50\`\n`;
-        desc += `\`!ajustar @membro sementes -200\`\n`;
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor("#2b2d31")
-        .setTitle(`📖 Comandos disponíveis — ${cfg.NAME}`)
-        .setDescription(desc)
-        .setTimestamp();
-
-      const thumb = getThumb(client);
-      if (thumb) embed.setThumbnail(thumb);
-
-      return message.reply({ embeds: [embed] });
+    for (const guildId of Object.keys(CONFIGS)) {
+      console.log(`🛠️ Registrando slash commands na guild ${guildId}...`);
+      await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId), { body: commands });
+      console.log(`✅ Slash commands registrados na guild ${guildId}`);
     }
-
-    // ==========================
-    // 🧾 !historico (SÓ 00)
-    // ==========================
-    if (lower.startsWith("!historico")) {
-      if (!is00) return message.reply("❌ Só o **00** pode usar esse comando.");
-
-      const target = message.mentions.users.first();
-      if (!target) return message.reply("⚠️ Use: `!historico @membro` (opcional: `hoje|ontem` `papel|sementes` `50`)");
-
-      const parts = content.split(/\s+/);
-
-      let diaOpt = null;
-      let tipoOpt = null;
-      let limit = 30;
-
-      for (let i = 2; i < parts.length; i++) {
-        const p = (parts[i] || "").toLowerCase();
-
-        if (p === "hoje") diaOpt = todayKey();
-        else if (p === "ontem") diaOpt = yesterdayKey();
-        else if (p === "papel" || p === "sementes") tipoOpt = p;
-        else {
-          const n = parseInt(p, 10);
-          if (!isNaN(n)) limit = n;
-        }
-      }
-
-      const rows = await getHistoricoUser(message.guild.id, target.id, limit, { dia: diaOpt, tipo: tipoOpt });
-
-      if (!rows.length) {
-        return message.reply(`📌 Não achei histórico para <@${target.id}> nesse filtro.`);
-      }
-
-      const lines = rows.map((r, i) => {
-        const emo = statusEmoji(r.status);
-        const tipo = (r.tipo || "").toUpperCase();
-        const q = Number(r.quantidade ?? 0);
-        const aplicado = r.aplicado == null ? "-" : Number(r.aplicado);
-        const carry = r.carry == null ? "-" : Number(r.carry);
-        const staff = r.gerenteId ? `<@${r.gerenteId}>` : "-";
-        const dia = r.dia || "-";
-        return `${i + 1}. ${emo} **${r.status}** • **${tipo}** • q=${q} • aplicado=${aplicado} • extra=${carry} • dia=${dia} • por=${staff}`;
-      });
-
-      const chunks = chunkTextLines(lines, 3800);
-      const thumb = getThumb(client);
-
-      const filtroTxt =
-        `👤 Usuário: <@${target.id}>\n` +
-        `🔎 Filtro: ${diaOpt ? `dia=${diaOpt}` : "dia=TODOS"} | ${tipoOpt ? `tipo=${tipoOpt}` : "tipo=TODOS"}\n\n`;
-
-      for (let idx = 0; idx < chunks.length; idx++) {
-        const embed = new EmbedBuilder()
-          .setColor("#2b2d31")
-          .setTitle(`🧾 Histórico — ${cfg.NAME}`)
-          .setDescription(`${filtroTxt}${chunks[idx]}`)
-          .setTimestamp();
-
-        if (thumb) embed.setThumbnail(thumb);
-
-        if (idx === 0) await message.reply({ embeds: [embed] });
-        else await message.channel.send({ embeds: [embed] });
-      }
-      return;
-    }
-
-    // ==========================
-    // 👑 !ajustar (SÓ 00)
-    // ==========================
-    if (lower.startsWith("!ajustar")) {
-      if (!is00) return message.reply("❌ Só o **00** pode usar esse comando.");
-
-      const target = message.mentions.users.first();
-      if (!target) {
-        return message.reply("⚠️ Use assim: `!ajustar @membro papel +80` ou `!ajustar @membro sementes -120`");
-      }
-
-      const parts = content.split(/\s+/);
-      const tipo = (parts[2] || "").toLowerCase();
-      const deltaStr = parts[3] || "";
-
-      if (!["papel", "sementes"].includes(tipo)) {
-        return message.reply("❌ Tipo inválido. Use `papel` ou `sementes`.\nEx: `!ajustar @membro papel +80`");
-      }
-      if (!deltaStr) {
-        return message.reply("❌ Falta o valor. Ex: `!ajustar @membro papel -120`");
-      }
-
-      const delta = parseInt(deltaStr, 10);
-      if (isNaN(delta) || delta === 0) {
-        return message.reply("❌ Valor inválido. Use número inteiro diferente de 0.\nEx: `+80` ou `-120`");
-      }
-
-      await ensureUser(message.guild.id, target.id);
-
-      const { before, after } = await applyAdjustDirect(message.guild.id, target.id, tipo, delta);
-
-      await insertHistorico({
-        guildId: message.guild.id,
-        userId: target.id,
-        tipo,
-        quantidade: delta,
-        status: "AJUSTE",
-        msgId: message.id,
-        gerenteId: message.author.id,
-        aplicado: null,
-        carry: null,
-        dia: todayKey(),
-      });
-
-      const bP = Number(before.papelHoje || 0), bPC = Number(before.papelCarry || 0);
-      const bS = Number(before.sementesHoje || 0), bSC = Number(before.sementesCarry || 0);
-      const aP = Number(after.papelHoje || 0), aPC = Number(after.papelCarry || 0);
-      const aS = Number(after.sementesHoje || 0), aSC = Number(after.sementesCarry || 0);
-
-      const deltaTxt = delta > 0 ? `+${delta}` : `${delta}`;
-
-      const embed = new EmbedBuilder()
-        .setColor("#2b2d31")
-        .setTitle("👑 Ajuste aplicado (00)")
-        .setDescription(
-          `👤 Usuário: <@${target.id}>\n` +
-          `🧾 Tipo: **${tipo.toUpperCase()}**\n` +
-          `🔧 Ajuste: **${deltaTxt}**\n\n` +
-          `🔎 **ANTES**\n` +
-          `📄 Papel: **${bP}/100** (extra: ${bPC})\n` +
-          `🌱 Sementes: **${bS}/100** (extra: ${bSC})\n\n` +
-          `✅ **DEPOIS**\n` +
-          `📄 Papel: **${aP}/100** (extra: ${aPC})\n` +
-          `🌱 Sementes: **${aS}/100** (extra: ${aSC})\n\n` +
-          `🛡️ Ajustado por: <@${message.author.id}>`
-        )
-        .setTimestamp();
-
-      const thumb = getThumb(client);
-      if (thumb) embed.setThumbnail(thumb);
-
-      await message.reply({ embeds: [embed] });
-
-      const logChannel = getLogChannel(message.guild);
-      if (logChannel) {
-        const logEmbed = new EmbedBuilder()
-          .setColor("#ff4d4d")
-          .setTitle(`🚨 AJUSTE ADMINISTRATIVO — ${cfg.NAME}`)
-          .setDescription(
-            `👤 Usuário: <@${target.id}>\n` +
-            `📦 Tipo: **${tipo.toUpperCase()}**\n\n` +
-            `🔎 **ANTES**\n` +
-            `📄 Papel: ${bP}/100 (extra: ${bPC})\n` +
-            `🌱 Sementes: ${bS}/100 (extra: ${bSC})\n\n` +
-            `✏️ **AJUSTE**\n` +
-            `${deltaTxt}\n\n` +
-            `✅ **DEPOIS**\n` +
-            `📄 Papel: ${aP}/100 (extra: ${aPC})\n` +
-            `🌱 Sementes: ${aS}/100 (extra: ${aSC})\n\n` +
-            `🛡️ Por: <@${message.author.id}>`
-          )
-          .setTimestamp();
-
-        if (thumb) logEmbed.setThumbnail(thumb);
-        await logChannel.send({ embeds: [logEmbed] }).catch(() => null);
-      }
-
-      return;
-    }
-
-    // ==========================
-    // ✏️ !editar (SÓ 00) — reply no aprovado do BOT
-    // ==========================
-    if (lower.startsWith("!editar")) {
-      if (!is00) return message.reply("❌ Só o **00** pode usar esse comando.");
-
-      const refMsgId = message.reference?.messageId || null;
-      if (!refMsgId) return message.reply("⚠️ Use **reply** na mensagem aprovada do bot e mande `!editar 10`.");
-
-      const parts = content.split(/\s+/);
-      let tipoArg = null;
-      let qtyArg = null;
-
-      if (parts.length === 2) {
-        qtyArg = parts[1];
-      } else if (parts.length >= 3) {
-        tipoArg = (parts[1] || "").toLowerCase();
-        qtyArg = parts[2];
-      }
-
-      const newQty = parseInt(qtyArg, 10);
-      if (isNaN(newQty) || newQty <= 0) return message.reply("❌ Quantidade inválida. Ex: `!editar 10`");
-
-      const h = await getHistoricoAprovadoByMsgId(message.guild.id, refMsgId);
-      if (!h) return message.reply("⚠️ Não achei farme **APROVADO** pra essa mensagem.");
-
-      const dia = todayKey();
-      if (String(h.dia) !== String(dia)) {
-        return message.reply("⚠️ Por segurança, só dá pra editar farme **do dia de hoje**.");
-      }
-
-      if (tipoArg && !["papel", "sementes"].includes(tipoArg)) {
-        return message.reply("❌ Tipo inválido. Use `papel` ou `sementes` (ou só `!editar 10`).");
-      }
-      if (tipoArg && tipoArg !== h.tipo) {
-        return message.reply(`⚠️ Esse farme é do tipo **${h.tipo}**. Use: \`!editar ${newQty}\` (ou o tipo correto).`);
-      }
-
-      await ensureUser(message.guild.id, h.userId);
-
-      const beforeUser = await rollToToday(message.guild.id, h.userId);
-
-      const dbClient = await pool.connect();
-      try {
-        await dbClient.query("BEGIN");
-        await recalcTipoDia(dbClient, message.guild.id, h.userId, h.tipo, dia, h.id, newQty);
-        await dbClient.query("COMMIT");
-      } catch (e) {
-        await dbClient.query("ROLLBACK");
-        console.error("❌ Erro no !editar:", e?.stack || e);
-        return message.reply("❌ Deu erro ao editar. Veja os logs do Render.");
-      } finally {
-        dbClient.release();
-      }
-
-      const h2 = await getHistoricoAprovadoByMsgId(message.guild.id, refMsgId);
-      const afterUser = await rollToToday(message.guild.id, h.userId);
-
-      await insertHistorico({
-        guildId: message.guild.id,
-        userId: h.userId,
-        tipo: h.tipo,
-        quantidade: newQty,
-        status: "EDITADO",
-        msgId: message.id,
-        gerenteId: message.author.id,
-        aplicado: h2?.aplicado ?? null,
-        carry: h2?.carry ?? null,
-        dia: todayKey(),
-      });
-
-      try {
-        const refMsg = await message.channel.messages.fetch(refMsgId);
-        if (refMsg?.author?.id === client.user.id) {
-          await refMsg
-            .edit({
-              content:
-                `✅ **Aprovado (EDITADO)**\n` +
-                `📦 ${h.tipo.toUpperCase()} • ${newQty}\n` +
-                `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n\n` +
-                `👤 Usuário: <@${h.userId}>\n` +
-                `🛡️ Editado por: <@${message.author.id}>`,
-              components: [],
-            })
-            .catch(() => null);
-        }
-      } catch {}
-
-      const embed = new EmbedBuilder()
-        .setColor("#2b2d31")
-        .setTitle("✏️ Farme editado com sucesso")
-        .setDescription(
-          `👤 Usuário: <@${h.userId}>\n` +
-          `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-          `📦 Nova quantidade: **${newQty}**\n` +
-          `➡️ Aplicado hoje: **${h2?.aplicado ?? 0}** | Extra (amanhã): **${h2?.carry ?? 0}**\n` +
-          `📅 Dia: **${dia}**`
-        )
-        .setTimestamp();
-
-      const thumb = getThumb(client);
-      if (thumb) embed.setThumbnail(thumb);
-
-      await message.reply({ embeds: [embed] });
-
-      const logChannel = getLogChannel(message.guild);
-      if (logChannel) {
-        const bP = Number(beforeUser?.papelHoje || 0), bPC = Number(beforeUser?.papelCarry || 0);
-        const bS = Number(beforeUser?.sementesHoje || 0), bSC = Number(beforeUser?.sementesCarry || 0);
-        const aP = Number(afterUser?.papelHoje || 0), aPC = Number(afterUser?.papelCarry || 0);
-        const aS = Number(afterUser?.sementesHoje || 0), aSC = Number(afterUser?.sementesCarry || 0);
-
-        const logEmbed = new EmbedBuilder()
-          .setColor("#ffb020")
-          .setTitle(`🚨 EDITADO (00) — ${cfg.NAME}`)
-          .setDescription(
-            `👤 Usuário: <@${h.userId}>\n` +
-            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-            `📦 Nova quantidade (aprovada): **${newQty}**\n\n` +
-            `🔎 **ANTES**\n` +
-            `📄 Papel: ${bP}/100 (extra: ${bPC})\n` +
-            `🌱 Sementes: ${bS}/100 (extra: ${bSC})\n\n` +
-            `✅ **DEPOIS**\n` +
-            `📄 Papel: ${aP}/100 (extra: ${aPC})\n` +
-            `🌱 Sementes: ${aS}/100 (extra: ${aSC})\n\n` +
-            `🛡️ Por: <@${message.author.id}>`
-          )
-          .setTimestamp();
-
-        if (thumb) logEmbed.setThumbnail(thumb);
-        await logChannel.send({ embeds: [logEmbed] }).catch(() => null);
-      }
-
-      return;
-    }
-
-    // ==========================
-    // 🔁 !desfazer (SÓ 00) — reply no aprovado do BOT
-    // ==========================
-    if (lower === "!desfazer") {
-      if (!is00) return message.reply("❌ Só o **00** pode usar esse comando.");
-
-      const refMsgId = message.reference?.messageId || null;
-      if (!refMsgId) return message.reply("⚠️ Use **reply** na mensagem aprovada do bot e mande `!desfazer`.");
-
-      const h = await getHistoricoAprovadoByMsgId(message.guild.id, refMsgId);
-      if (!h) return message.reply("⚠️ Não achei farme **APROVADO** pra essa mensagem.");
-
-      const dia = todayKey();
-      if (String(h.dia) !== String(dia)) {
-        return message.reply("⚠️ Por segurança, só dá pra desfazer farme **do dia de hoje**.");
-      }
-
-      await ensureUser(message.guild.id, h.userId);
-
-      const beforeUser = await rollToToday(message.guild.id, h.userId);
-
-      const dbClient = await pool.connect();
-      try {
-        await dbClient.query("BEGIN");
-        await recalcTipoDia(dbClient, message.guild.id, h.userId, h.tipo, dia, h.id, 0);
-        await dbClient.query("COMMIT");
-      } catch (e) {
-        await dbClient.query("ROLLBACK");
-        console.error("❌ Erro no !desfazer:", e?.stack || e);
-        return message.reply("❌ Deu erro ao desfazer. Veja os logs do Render.");
-      } finally {
-        dbClient.release();
-      }
-
-      const afterUser = await rollToToday(message.guild.id, h.userId);
-
-      await insertHistorico({
-        guildId: message.guild.id,
-        userId: h.userId,
-        tipo: h.tipo,
-        quantidade: 0,
-        status: "DESFEITO",
-        msgId: message.id,
-        gerenteId: message.author.id,
-        aplicado: 0,
-        carry: 0,
-        dia: todayKey(),
-      });
-
-      try {
-        const refMsg = await message.channel.messages.fetch(refMsgId);
-        if (refMsg?.author?.id === client.user.id) {
-          await refMsg
-            .edit({
-              content:
-                `🔁 **DESFEITO**\n` +
-                `📦 ${h.tipo.toUpperCase()} • 0\n` +
-                `➡️ Aplicado hoje: **0** | Extra (amanhã): **0**\n\n` +
-                `👤 Usuário: <@${h.userId}>\n` +
-                `🛡️ Desfeito por: <@${message.author.id}>`,
-              components: [],
-            })
-            .catch(() => null);
-        }
-      } catch {}
-
-      const embed = new EmbedBuilder()
-        .setColor("#2b2d31")
-        .setTitle("🔁 Farme desfeito com sucesso")
-        .setDescription(
-          `👤 Usuário: <@${h.userId}>\n` +
-          `🧾 Tipo: **${h.tipo.toUpperCase()}**\n` +
-          `📦 Revertido para: **0**\n` +
-          `🛡️ Desfeito por: <@${message.author.id}>\n` +
-          `📅 Dia: **${dia}**`
-        )
-        .setTimestamp();
-
-      const thumb = getThumb(client);
-      if (thumb) embed.setThumbnail(thumb);
-
-      await message.reply({ embeds: [embed] });
-
-      const logChannel = getLogChannel(message.guild);
-      if (logChannel) {
-        const bP = Number(beforeUser?.papelHoje || 0), bPC = Number(beforeUser?.papelCarry || 0);
-        const bS = Number(beforeUser?.sementesHoje || 0), bSC = Number(beforeUser?.sementesCarry || 0);
-        const aP = Number(afterUser?.papelHoje || 0), aPC = Number(afterUser?.papelCarry || 0);
-        const aS = Number(afterUser?.sementesHoje || 0), aSC = Number(afterUser?.sementesCarry || 0);
-
-        const logEmbed = new EmbedBuilder()
-          .setColor("#ff4d4d")
-          .setTitle(`🚨 DESFEITO (00) — ${cfg.NAME}`)
-          .setDescription(
-            `👤 Usuário: <@${h.userId}>\n` +
-            `🧾 Tipo: **${h.tipo.toUpperCase()}**\n\n` +
-            `🔎 **ANTES**\n` +
-            `📄 Papel: ${bP}/100 (extra: ${bPC})\n` +
-            `🌱 Sementes: ${bS}/100 (extra: ${bSC})\n\n` +
-            `✅ **DEPOIS**\n` +
-            `📄 Papel: ${aP}/100 (extra: ${aPC})\n` +
-            `🌱 Sementes: ${aS}/100 (extra: ${aSC})\n\n` +
-            `🛡️ Por: <@${message.author.id}>`
-          )
-          .setTimestamp();
-
-        if (thumb) logEmbed.setThumbnail(thumb);
-        await logChannel.send({ embeds: [logEmbed] }).catch(() => null);
-      }
-
-      return;
-    }
-
-    // ==========================
-    // 📊 !relatorio
-    // ==========================
-    if (lower === "!relatorio") {
-      if (!isGerente && !is00) return message.reply("❌ Sem permissão.");
-
-      const dia = todayKey();
-      const resumo = await getResumoGeralDia(message.guild.id, dia);
-      const tabela = await getTabelaResumoDia(message.guild.id, dia);
-
-      const totalGeral = (resumo.papel_total || 0) + (resumo.sementes_total || 0);
-      const top5 = tabela.slice(0, 5);
-
-      const topTxt = top5.length
-        ? top5.map((r, i) => `${i + 1}. <@${r.userId}> — ✅ Total: **${r.total}** (📄 ${r.papel} | 🌱 ${r.sementes})`).join("\n")
-        : "Nenhum farme aprovado hoje.";
-
-      const embed = new EmbedBuilder()
-        .setColor("#2b2d31")
-        .setTitle(`📊 Relatório Geral — ${cfg.NAME}`)
-        .setDescription(
-          `📅 Dia: **${dia}**\n\n` +
-            `👥 Membros com farme aprovado: **${resumo.total_membros}**\n` +
-            `📄 Total Papel aprovado: **${resumo.papel_total}**\n` +
-            `🌱 Total Sementes aprovadas: **${resumo.sementes_total}**\n` +
-            `📦 Total Geral aprovado: **${totalGeral}**\n\n` +
-            `🏆 **Top 5 do dia:**\n${topTxt}`
-        )
-        .setTimestamp();
-
-      const thumb = getThumb(client);
-      if (thumb) embed.setThumbnail(thumb);
-
-      return message.reply({ embeds: [embed] });
-    }
-
-    // ==========================
-    // 🚫 !naofarmou
-    // ==========================
-    if (lower.startsWith("!naofarmou")) {
-      if (!isGerente && !is00) return message.reply("❌ Sem permissão.");
-
-      const parts = content.split(/\s+/);
-      const roleArg = parts.slice(1).join(" ").trim();
-      const role = resolveRoleFromMessage(message, roleArg);
-
-      await message.guild.members.fetch();
-
-      const dia = todayKey();
-      const aprovadosSet = await getAprovadosUserIdsDia(message.guild.id, dia);
-
-      const allMembers = Array.from(message.guild.members.cache.values()).filter((m) => !m.user.bot);
-      const scopedMembers = role ? allMembers.filter((m) => m.roles.cache.has(role.id)) : allMembers;
-
-      const naoFarmaram = scopedMembers.filter((m) => !aprovadosSet.has(String(m.user.id)));
-
-      const scopeTxt = role ? `Cargo: **${role.name}**` : "Cargo: **Todos**";
-      const header =
-        `📅 Dia: **${dia}**\n` +
-        `🎯 ${scopeTxt}\n` +
-        `👥 Total analisado: **${scopedMembers.length}**\n` +
-        `🚫 Sem farme aprovado: **${naoFarmaram.length}**`;
-
-      if (!naoFarmaram.length) {
-        const embed = new EmbedBuilder()
-          .setColor("#2b2d31")
-          .setTitle(`🚫 Não farmou (aprovado) — ${cfg.NAME}`)
-          .setDescription(`${header}\n\n✅ Todo mundo desse filtro teve farme aprovado hoje.`)
-          .setTimestamp();
-
-        const thumb = getThumb(client);
-        if (thumb) embed.setThumbnail(thumb);
-
-        return message.reply({ embeds: [embed] });
-      }
-
-      const lines = naoFarmaram.map((m, i) => `${i + 1}. <@${m.user.id}>`).slice(0, 300);
-      const chunks = chunkTextLines(lines, 3800);
-      const thumb = getThumb(client);
-
-      for (let idx = 0; idx < chunks.length; idx++) {
-        const embed = new EmbedBuilder()
-          .setColor("#2b2d31")
-          .setTitle(`🚫 Não farmou (aprovado) — ${cfg.NAME}`)
-          .setDescription(`${header}\n\n${chunks[idx]}`)
-          .setTimestamp();
-
-        if (thumb) embed.setThumbnail(thumb);
-
-        if (idx === 0) await message.reply({ embeds: [embed] });
-        else await message.channel.send({ embeds: [embed] });
-      }
-      return;
-    }
-
-    // ==========================
-    // 📊 !tabela
-    // ==========================
-    if (lower.startsWith("!tabela")) {
-      const parts = content.split(/\s+/);
-      const arg = (parts[1] || "hoje").toLowerCase();
-
-      let dia = todayKey();
-      let tituloDia = "Hoje";
-      if (arg === "ontem") {
-        dia = yesterdayKey();
-        tituloDia = "Ontem";
-      }
-
-      const rows = await getTabelaResumoDia(message.guild.id, dia);
-
-      if (!rows.length) {
-        return message.reply(`📊 **Tabela (${tituloDia})**\nNenhum farme **aprovado** em **${dia}**.`);
-      }
-
-      const lines = rows.map(
-        (r, i) => `${i + 1}. <@${r.userId}> — 📄 **${r.papel}** | 🌱 **${r.sementes}** | ✅ Total: **${r.total}**`
-      );
-      const thumb = getThumb(client);
-      const chunks = chunkTextLines(lines, 3800);
-
-      for (let idx = 0; idx < chunks.length; idx++) {
-        const embed = new EmbedBuilder()
-          .setColor("#2b2d31")
-          .setTitle(`📊 Tabela de Farmes Aprovados — ${cfg.NAME}`)
-          .setDescription(`📅 Dia: **${dia}** (${tituloDia})\n\n${chunks[idx]}`)
-          .setTimestamp();
-
-        if (thumb) embed.setThumbnail(thumb);
-
-        if (idx === 0) await message.reply({ embeds: [embed] });
-        else await message.channel.send({ embeds: [embed] });
-      }
-      return;
-    }
-
-    // ==========================
-    // !status
-    // ==========================
-    if (lower === "!status") {
-      const u = await rollToToday(message.guild.id, message.author.id);
-      if (!u) return message.reply("❌ Erro interno (usuário inválido).");
-
-      const totalsHoje = await getTotaisDia(message.guild.id, message.author.id, todayKey());
-      const faltamP = Math.max(0, META_DIARIA - (totalsHoje.papel || 0));
-      const faltamS = Math.max(0, META_DIARIA - (totalsHoje.sementes || 0));
-
-      const papelDebt = Number(u.papelDebt || 0);
-      const sementesDebt = Number(u.sementesDebt || 0);
-      const debtLine = formatDebtLine(papelDebt, sementesDebt);
-
-      const txt =
-        `🏷️ Servidor: **${cfg.NAME}**\n` +
-        `👤 ${message.author}\n\n` +
-        `📄 **Papel:** ${u.papelHoje}/100 (extra: ${u.papelCarry})\n` +
-        `🌱 **Sementes:** ${u.sementesHoje}/100 (extra: ${u.sementesCarry})\n\n` +
-        `${formatFaltamLine(faltamP, faltamS)}\n` +
-        `${formatAtrasadoTotalLine(papelDebt, sementesDebt)}\n` +
-        (debtLine ? `${debtLine}\n` : "✅ Farme atrasado: 0\n") +
-        `\n🕒 Dia: **${u.ultimoDia}**`;
-
-      const embed = new EmbedBuilder()
-        .setColor("#2b2d31")
-        .setTitle("📌 Seu Status")
-        .setDescription(txt)
-        .setFooter({ text: "Comando: !status" })
-        .setTimestamp();
-
-      const thumb = getThumb(client);
-      if (thumb) embed.setThumbnail(thumb);
-
-      return message.reply({ embeds: [embed] });
-    }
-
-    // ==========================
-    // !farme (somente canal ENVIO)
-    // ==========================
-    if (lower.startsWith("!farme")) {
-      if (!isEnvioChannel(message)) return;
-
-      const args = content.split(/\s+/);
-      const tipo = (args[1] || "").toLowerCase();
-      const quantidade = parseInt(args[2], 10);
-
-      if (!["papel", "sementes"].includes(tipo)) {
-        return message.reply("❌ Tipo inválido. Use: `papel` ou `sementes`.\nEx: `!farme papel 10`");
-      }
-      if (isNaN(quantidade) || quantidade <= 0) {
-        return message.reply("❌ Quantidade inválida. Ex: `!farme sementes 25`");
-      }
-      if (!message.attachments.size) {
-        return message.reply("❌ Envie o print junto.");
-      }
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`aprovar_${message.author.id}_${quantidade}_${tipo}`)
-          .setLabel("Aprovar")
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId(`negar_${message.author.id}_${quantidade}_${tipo}`)
-          .setLabel("Negar")
-          .setStyle(ButtonStyle.Danger)
-      );
-
-      return message.reply({
-        content:
-          `📥 Farme enviado por ${message.author}\n` +
-          `📦 **${tipo.toUpperCase()}** • **${quantidade}**\n` +
-          `⏳ Aguardando gerente/00...`,
-        components: [row],
-      });
-    }
-
-    void isGerente;
-    void is00;
-  } catch (e) {
-    console.error("Erro messageCreate:", e?.stack || e);
-    try {
-      await message.reply("❌ Erro interno.");
-    } catch {}
+  } catch (err) {
+    console.error("❌ ERRO ao registrar commands:", err?.rawError || err);
   }
+}
+
+// ======================================================
+// READY
+// ======================================================
+client.once("ready", async () => {
+  console.log(`✅ BOT REALMENTE ONLINE: ${client.user.tag}`);
+
+  await cleanupDB().catch(() => null);
+  setInterval(() => cleanupDB().catch(() => null), CLEANUP_EVERY_MS);
+
+  cron.schedule(
+    "5 3 * * *",
+    async () => {
+      await runDailyAuditAndReport().catch((e) => console.error("Daily job error:", e));
+    },
+    { timezone: TZ }
+  );
+
+  cron.schedule(
+    "*/5 * * * *",
+    async () => {
+      for (const guild of client.guilds.cache.values()) {
+        await updateLeaderboardFixed(guild).catch(() => null);
+      }
+    },
+    { timezone: TZ }
+  );
+
+  for (const guild of client.guilds.cache.values()) {
+    await updateLeaderboardFixed(guild).catch(() => null);
+  }
+
+  console.log(`⏰ Daily job: 03:05 (${TZ}) | Auto refresh leaderboard: 5 em 5 min`);
 });
 
-// ==========================
-// 🔘 BUTTONS
-// ==========================
+// ======================================================
+// INTERACTIONS
+// ======================================================
 client.on("interactionCreate", async (interaction) => {
   try {
-    if (!interaction.isButton() || !interaction.guild) return;
+    if (!interaction.guild) {
+      if (interaction.isRepliable()) {
+        return interaction.reply({ content: "❌ Use isso dentro de um servidor.", ephemeral: true }).catch(() => null);
+      }
+      return;
+    }
 
     const cfg = getCfg(interaction.guild.id);
-    if (!cfg) return;
-
-    const member = interaction.member ?? (await interaction.guild.members.fetch(interaction.user.id));
-    const isGerente = member.roles.cache.has(cfg.GERENTE_ROLE_ID);
-    const is00 = member.roles.cache.has(cfg.ROLE_00_ID);
-
-    console.log(
-      "[BTN]",
-      "guild=",
-      interaction.guild.id,
-      "user=",
-      interaction.user.id,
-      "customId=",
-      interaction.customId,
-      "is00=",
-      is00,
-      "isGerente=",
-      isGerente
-    );
-
-    if (!isGerente && !is00) {
-      return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
-    }
-
-    const parts = interaction.customId.split("_");
-    const acao = parts[0];
-    const userId = parts[1];
-    const quantidade = parseInt(parts[2], 10);
-    const tipo = parts[3];
-    const msgId = interaction.message?.id;
-
-    if (!msgId) return interaction.reply({ content: "⚠️ Não consegui pegar o ID da mensagem.", ephemeral: true });
-
-    try {
-      await interaction.deferUpdate();
-    } catch (e) {
-      console.log("[DEFER_FAIL]", e?.message || e);
-      return;
-    }
-
-    if (await alreadyProcessed(interaction.guild.id, msgId)) {
-      return interaction.followUp({ content: "⚠️ Esse farme já foi processado.", ephemeral: true });
-    }
-
-    if (!["papel", "sementes"].includes(tipo) || isNaN(quantidade) || quantidade <= 0) {
-      return interaction.followUp({ content: "⚠️ Dados inválidos nesse botão.", ephemeral: true });
-    }
-
-    const logChannel = getLogChannel(interaction.guild);
-
-    const sendLogEmbed = async (title, description) => {
-      if (!logChannel) return;
-      const embed = new EmbedBuilder().setColor("#2b2d31").setTitle(title).setDescription(description).setTimestamp();
-      const thumb = getThumb(interaction);
-      if (thumb) embed.setThumbnail(thumb);
-      await logChannel.send({ embeds: [embed] }).catch(() => null);
-    };
-
-    if (acao === "aprovar") {
-      const result = await applyFarm(interaction.guild.id, userId, tipo, quantidade);
-      const u = result.user;
-
-      await insertHistorico({
-        guildId: interaction.guild.id,
-        userId,
-        tipo,
-        quantidade,
-        status: "APROVADO",
-        msgId,
-        gerenteId: interaction.user.id,
-        aplicado: result.aplicado,
-        carry: result.carry,
-        dia: todayKey(),
-      });
-
-      await interaction.message
-        .edit({
-          content:
-            `✅ **Aprovado**\n` +
-            `📦 ${tipo.toUpperCase()} • ${quantidade}\n` +
-            `➡️ Aplicado hoje: **${result.aplicado}** | Extra (amanhã): **${result.carry}**\n\n` +
-            `📄 Papel: **${u.papelHoje}/100** (extra: ${u.papelCarry})\n` +
-            `🌱 Sementes: **${u.sementesHoje}/100** (extra: ${u.sementesCarry})\n\n` +
-            `📝 (Para o 00) Reply aqui e use: **!editar 10** ou **!desfazer**`,
-          components: [],
-        })
-        .catch(() => null);
-
-      await sendLogEmbed(
-        `✅ FARME APROVADO — ${cfg.NAME}`,
-        `👤 Usuário: <@${userId}>\n🧾 Tipo: **${tipo.toUpperCase()}**\n📦 Quantidade: **${quantidade}**\n🛡️ Aprovado por: <@${interaction.user.id}>`
-      );
-      return;
-    }
-
-    if (acao === "negar") {
-      await insertHistorico({
-        guildId: interaction.guild.id,
-        userId,
-        tipo,
-        quantidade,
-        status: "NEGADO",
-        msgId,
-        gerenteId: interaction.user.id,
-        aplicado: 0,
-        carry: 0,
-        dia: todayKey(),
-      });
-
-      await interaction.message
-        .edit({
-          content: `❌ **Negado**\n📦 ${tipo.toUpperCase()} • ${quantidade}`,
-          components: [],
-        })
-        .catch(() => null);
-
-      await sendLogEmbed(
-        `❌ FARME NEGADO — ${cfg.NAME}`,
-        `👤 Usuário: <@${userId}>\n🧾 Tipo: **${tipo.toUpperCase()}**\n📦 Quantidade: **${quantidade}**\n🛡️ Negado por: <@${interaction.user.id}>`
-      );
-      return;
-    }
-
-    return interaction.followUp({ content: "⚠️ Ação inválida.", ephemeral: true });
-  } catch (e) {
-    console.error("Erro interactionCreate:", e?.stack || e);
-    try {
-      if (interaction.deferred || interaction.replied) {
-        await interaction.followUp({ content: "❌ Erro interno.", ephemeral: true });
-      } else {
-        await interaction.reply({ content: "❌ Erro interno.", ephemeral: true });
+    if (!cfg) {
+      if (interaction.isRepliable()) {
+        return interaction.reply({ content: "❌ Esse servidor não está configurado.", ephemeral: true }).catch(() => null);
       }
-    } catch {}
+      return;
+    }
+
+    // ==================================================
+    // /ajuda
+    // ==================================================
+    if (interaction.isChatInputCommand() && interaction.commandName === "ajuda") {
+      const embed = getHelpEmbedFor(interaction.member, cfg);
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    // ==================================================
+    // /testardiario
+    // ==================================================
+    if (interaction.isChatInputCommand() && interaction.commandName === "testardiario") {
+      if (!isStaff(interaction.member, cfg)) {
+        return interaction.reply({ content: "❌ Apenas 00/Gerente.", ephemeral: true });
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+
+      const dia = interaction.options.getString("dia", true);
+      const dataStr = interaction.options.getString("data", false);
+
+      const dk = resolveDateKeyFromOption({ dia, dataStr });
+      if (!dk) return interaction.editReply('❌ Data inválida. Use: **YYYY-MM-DD**.');
+
+      await interaction.guild.members.fetch().catch(() => null);
+
+      const targets = interaction.guild.members.cache
+        .filter((m) => isTrackedMember(m, cfg))
+        .map((m) => m)
+        .sort((a, b) => (a.displayName || a.user.username).localeCompare(b.displayName || b.user.username));
+
+      const rows = [];
+      for (const m of targets) {
+        rows.push(await buildStaffRow(interaction.guild.id, m.user.id, m.displayName || m.user.username, dk));
+      }
+
+      const trackedRolesTxt = [
+        cfg.ROLE_MEMBRO_ID ? `<@&${cfg.ROLE_MEMBRO_ID}>` : null,
+        cfg.GERENTE_ROLE_ID ? `<@&${cfg.GERENTE_ROLE_ID}>` : null,
+        cfg.ROLE_00_ID ? `<@&${cfg.ROLE_00_ID}>` : null,
+      ].filter(Boolean).join(" | ");
+
+      const header =
+        `📌 **Tabela de metas** solicitada por <@${interaction.user.id}> — Data: **${dk}**\n` +
+        `Cargos: ${trackedRolesTxt || "não configurados"}\n` +
+        `Total encontrados: **${targets.length}**\n` +
+        `Legenda: **Rotas no dia** = quantidade aprovada no dia | **Rota completa** = dias seguidos faltando (0 se fez no dia).`;
+
+      const pages = splitIntoPages(rows.length ? rows : ["⚠️ Ninguém encontrado nesses cargos."], 3500);
+      const embeds = pages.slice(0, 8).map((txt, idx) =>
+        new EmbedBuilder()
+          .setTitle(`📊 Controle de metas (${dk})${pages.length > 1 ? ` — Parte ${idx + 1}/${pages.length}` : ""}`)
+          .setDescription(txt)
+          .setTimestamp(new Date())
+      );
+
+      const ok = await sendStaffTable(interaction.guild, header, embeds);
+      if (!ok) return interaction.editReply("❌ STAFF_TABLE_CHANNEL_ID não configurado nesse servidor.");
+
+      return interaction.editReply(`✅ Postei a tabela no canal staff.`);
+    }
+
+    // ==================================================
+    // /farme
+    // ==================================================
+    if (interaction.isChatInputCommand() && interaction.commandName === "farme") {
+      if (!cfg.FARME_CATEGORY_ID) {
+        return interaction.reply({ content: "❌ FARME_CATEGORY_ID não configurado neste servidor.", ephemeral: true });
+      }
+
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId("farme_menu")
+        .setPlaceholder("Escolha uma opção…")
+        .addOptions(FARME_OPTIONS);
+
+      return interaction.reply({
+        content: "Selecione a opção para criar/abrir seu canal privado:",
+        components: [new ActionRowBuilder().addComponents(menu)],
+        ephemeral: true,
+      });
+    }
+
+    // ==================================================
+    // /gerenciarcanal
+    // ==================================================
+    if (interaction.isChatInputCommand() && interaction.commandName === "gerenciarcanal") {
+      if (!isStaff(interaction.member, cfg)) {
+        return interaction.reply({ content: "❌ Apenas 00/Gerente.", ephemeral: true });
+      }
+
+      const latest = await getLatestRequestByChannel(interaction.guild.id, interaction.channelId);
+      if (!latest) {
+        return interaction.reply({ content: "❌ Não encontrei nenhum pedido salvo para este canal.", ephemeral: true });
+      }
+
+      return interaction.reply({
+        content: `🛠️ Painel do canal atual (Pedido: ${latest.status})`,
+        components: [staffPanelButtons(latest.requestId, is00(interaction.member, cfg))],
+        ephemeral: true,
+      });
+    }
+
+    // ==================================================
+    // MENU /farme
+    // ==================================================
+    if (interaction.isStringSelectMenu() && interaction.customId === "farme_menu") {
+      const selected = interaction.values[0];
+      const opt = FARME_OPTIONS.find((o) => o.value === selected);
+      if (!opt) {
+        return interaction.reply({ content: "❌ Item inválido.", ephemeral: true });
+      }
+
+      const channelName = `farme-${selected}-${slugUser(interaction.user)}`.slice(0, 90);
+
+      let targetChannel = interaction.guild.channels.cache.find(
+        (c) => c.type === ChannelType.GuildText && c.name === channelName
+      );
+
+      if (!targetChannel) {
+        targetChannel = await interaction.guild.channels.create({
+          name: channelName,
+          type: ChannelType.GuildText,
+          parent: cfg.FARME_CATEGORY_ID || null,
+          permissionOverwrites: [
+            { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+            {
+              id: interaction.user.id,
+              allow: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory,
+                PermissionFlagsBits.AttachFiles,
+              ],
+            },
+            {
+              id: cfg.ROLE_00_ID,
+              allow: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory,
+                PermissionFlagsBits.ManageMessages,
+                PermissionFlagsBits.ManageChannels,
+              ],
+            },
+            {
+              id: cfg.GERENTE_ROLE_ID,
+              allow: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory,
+                PermissionFlagsBits.ManageMessages,
+                PermissionFlagsBits.ManageChannels,
+              ],
+            },
+          ],
+          topic: `Canal privado de ${interaction.user.tag} - ${opt.label}`,
+        });
+      }
+
+      await upsertChannelMap(interaction.guild.id, interaction.user.id, selected, targetChannel.id);
+
+      if (targetChannel && targetChannel.messages) {
+        const fetched = await targetChannel.messages.fetch({ limit: 5 }).catch(() => null);
+        if (!fetched || fetched.size === 0) {
+          await targetChannel.send(
+            `👋 ${interaction.user}\n` +
+              `✅ Canal privado de **${opt.label}** criado.\n\n` +
+              `📌 Envie seu farme usando:\n` +
+              `**/enviarfarme quantidade: <número> print: <anexo>**`
+          ).catch(() => null);
+        }
+      }
+
+      const goBtn = new ButtonBuilder()
+        .setStyle(ButtonStyle.Link)
+        .setLabel("➡️ Ir para o canal")
+        .setURL(channelLink(interaction.guild.id, targetChannel.id));
+
+      return interaction.reply({
+        content: `✅ Canal pronto.`,
+        components: [new ActionRowBuilder().addComponents(goBtn)],
+        ephemeral: true,
+      });
+    }
+
+    // ==================================================
+    // /enviarfarme
+    // ==================================================
+    if (interaction.isChatInputCommand() && interaction.commandName === "enviarfarme") {
+      const opt = parseItemFromChannelName(interaction.channel?.name);
+      if (!opt) {
+        return interaction.reply({
+          content: "❌ Use este comando dentro do seu canal de farme (farme-...-seunome).",
+          ephemeral: true,
+        });
+      }
+
+      const remaining = await getCooldownRemaining(interaction.guild.id, interaction.user.id);
+      if (remaining > 0) {
+        return interaction.reply({ content: `⏳ Aguarde **${remaining}s** para enviar outro farme.`, ephemeral: true });
+      }
+
+      const quantidade = interaction.options.getInteger("quantidade", true);
+      const print = interaction.options.getAttachment("print", true);
+
+      if (!print.contentType?.startsWith("image/")) {
+        return interaction.reply({ content: "❌ O anexo precisa ser uma **imagem/print**.", ephemeral: true });
+      }
+
+      await setCooldown(interaction.guild.id, interaction.user.id);
+
+      const embed = makeRequestEmbed({
+        userTag: interaction.user.tag,
+        userId: interaction.user.id,
+        itemLabel: opt.label,
+        quantidade,
+        status: "🟡 Pendente",
+      }).setImage(print.url);
+
+      const msg = await interaction.channel.send({
+        content: `📣 Solicitação enviada por ${interaction.user}. (Aguardando **00/Gerente**)`,
+        embeds: [embed],
+        components: [publicButtons({ disabled: false })],
+      });
+
+      const requestId = msg.id;
+
+      await pool.query(
+        `INSERT INTO farme_requests
+        ("guildId","requestId","messageId","channelId","userId","userTag","itemValue","itemLabel",quantidade,"originalQuantidade","printUrl",status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending')`,
+        [
+          interaction.guild.id,
+          requestId,
+          msg.id,
+          interaction.channel.id,
+          interaction.user.id,
+          interaction.user.tag,
+          opt.value,
+          opt.label,
+          quantidade,
+          quantidade,
+          print.url,
+        ]
+      );
+
+      return interaction.reply({ content: "✅ Enviado! Aguarde aprovação do 00/Gerente.", ephemeral: true });
+    }
+
+    // ==================================================
+    // /meusfarmes
+    // ==================================================
+    if (interaction.isChatInputCommand() && interaction.commandName === "meusfarmes") {
+      const totals = await getUserTotals(interaction.guild.id, interaction.user.id);
+      const lines = FARME_OPTIONS.map((o) => `• **${o.label}**: ${totals.items[o.value] || 0}`).join("\n");
+
+      const embed = new EmbedBuilder()
+        .setTitle("📊 Sua Tabela de Farmes")
+        .setDescription(lines)
+        .addFields({ name: "🏁 Total", value: String(totals.total), inline: false })
+        .setTimestamp(new Date());
+
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    // ==================================================
+    // /ranking
+    // ==================================================
+    if (interaction.isChatInputCommand() && interaction.commandName === "ranking") {
+      const entries = await getRanking(interaction.guild.id, 10);
+
+      if (!entries.length) {
+        return interaction.reply({ content: "Ainda não tem farmes aprovados no ranking.", ephemeral: true });
+      }
+
+      const desc = entries.map((e, i) => `**${i + 1}.** <@${e.userId}> — **${e.total}**`).join("\n");
+      const embed = new EmbedBuilder().setTitle("🏆 Ranking de Farmes (Top 10)").setDescription(desc).setTimestamp(new Date());
+
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    // ==================================================
+    // BOTÃO APROVAR
+    // ==================================================
+    if (interaction.isButton() && interaction.customId === "farme_public_aprovar") {
+      await interaction.deferReply({ ephemeral: true });
+
+      if (!isStaff(interaction.member, cfg)) {
+        return interaction.editReply("❌ Apenas **00** ou **Gerente** pode aprovar/negar.");
+      }
+
+      const requestId = interaction.message.id;
+      const req = await getRequestByRequestId(interaction.guild.id, requestId);
+      if (!req) return interaction.editReply("❌ Não encontrei essa solicitação no banco.");
+
+      if (req.status !== "pending") {
+        return interaction.editReply({
+          content: "⚠️ Esse pedido já foi avaliado. Painel staff:",
+          components: [staffPanelButtons(requestId, is00(interaction.member, cfg))],
+        });
+      }
+
+      await pool.query(
+        `UPDATE farme_requests
+         SET status='approved',
+             "decidedAt"=NOW(),
+             "decidedById"=$1,
+             "decidedByTag"=$2
+         WHERE "guildId"=$3 AND "requestId"=$4`,
+        [interaction.user.id, interaction.user.tag, interaction.guild.id, requestId]
+      );
+
+      await markApprovedToday(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
+      await addTotals(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
+
+      const embed = makeRequestEmbed({
+        userTag: req.userTag,
+        userId: req.userId,
+        itemLabel: req.itemLabel,
+        quantidade: req.quantidade,
+        status: "🟢 Aprovado",
+        approverTag: interaction.user.tag,
+        adjustedInfo: req.adjustedNote || null,
+      }).setImage(req.printUrl);
+
+      await interaction.message.edit({
+        content: `📣 Pedido aprovado por **${interaction.user.tag}**.`,
+        embeds: [embed],
+        components: [publicButtons({ disabled: true })],
+      }).catch(() => null);
+
+      await safeNotifyDM(
+        req.userId,
+        `✅ Seu farme foi **APROVADO**.\nItem: **${req.itemLabel}**\nQuantidade: **${req.quantidade}**\nAprovado por: **${interaction.user.tag}**`
+      );
+
+      await sendLog(
+        interaction.guild,
+        `🟢 Aprovado | Membro: <@${req.userId}> | Por: <@${interaction.user.id}>\nItem: **${req.itemLabel}** | Quantidade: **${req.quantidade}**`,
+        embed
+      );
+
+      await updatePanelsAfterChange(interaction.guild, req.userId);
+
+      return interaction.editReply({
+        content: "✅ Aprovado. Painel staff:",
+        components: [staffPanelButtons(requestId, is00(interaction.member, cfg))],
+      });
+    }
+
+    // ==================================================
+    // BOTÃO NEGAR -> MODAL
+    // ==================================================
+    if (interaction.isButton() && interaction.customId === "farme_public_negar") {
+      if (!isStaff(interaction.member, cfg)) {
+        return interaction.reply({ content: "❌ Apenas **00** ou **Gerente** pode aprovar/negar.", ephemeral: true });
+      }
+
+      const requestId = interaction.message.id;
+      const req = await getRequestByRequestId(interaction.guild.id, requestId);
+      if (!req) return interaction.reply({ content: "❌ Pedido não encontrado.", ephemeral: true });
+
+      if (req.status !== "pending") {
+        return interaction.reply({
+          content: "⚠️ Esse pedido já foi avaliado.",
+          components: [staffPanelButtons(requestId, is00(interaction.member, cfg))],
+          ephemeral: true,
+        });
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId(`farme_modal_negar:${requestId}`)
+        .setTitle("Motivo da negação");
+
+      const reasonInput = new TextInputBuilder()
+        .setCustomId("deny_reason")
+        .setLabel("Explique o motivo (obrigatório)")
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setMaxLength(500);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(reasonInput));
+      return interaction.showModal(modal);
+    }
+
+    // ==================================================
+    // MODAL NEGAR
+    // ==================================================
+    if (interaction.isModalSubmit() && interaction.customId.startsWith("farme_modal_negar:")) {
+      await interaction.deferReply({ ephemeral: true });
+
+      if (!isStaff(interaction.member, cfg)) {
+        return interaction.editReply("❌ Apenas **00** ou **Gerente** pode negar.");
+      }
+
+      const requestId = interaction.customId.split(":")[1];
+      const req = await getRequestByRequestId(interaction.guild.id, requestId);
+      if (!req) return interaction.editReply("❌ Pedido não encontrado.");
+      if (req.status !== "pending") {
+        return interaction.editReply({
+          content: "⚠️ Esse pedido já foi avaliado.",
+          components: [staffPanelButtons(requestId, is00(interaction.member, cfg))],
+        });
+      }
+
+      const reason = interaction.fields.getTextInputValue("deny_reason")?.trim();
+      if (!reason) return interaction.editReply("❌ Motivo vazio.");
+
+      await pool.query(
+        `UPDATE farme_requests
+         SET status='denied',
+             "decidedAt"=NOW(),
+             "decidedById"=$1,
+             "decidedByTag"=$2,
+             "denyReason"=$3
+         WHERE "guildId"=$4 AND "requestId"=$5`,
+        [interaction.user.id, interaction.user.tag, reason, interaction.guild.id, requestId]
+      );
+
+      const embed = makeRequestEmbed({
+        userTag: req.userTag,
+        userId: req.userId,
+        itemLabel: req.itemLabel,
+        quantidade: req.quantidade,
+        status: "🔴 Negado",
+        approverTag: interaction.user.tag,
+        reason,
+        adjustedInfo: req.adjustedNote || null,
+      }).setImage(req.printUrl);
+
+      const channel = await interaction.guild.channels.fetch(req.channelId).catch(() => null);
+      if (channel && channel.isTextBased()) {
+        const msg = await channel.messages.fetch(req.messageId).catch(() => null);
+        if (msg) {
+          await msg.edit({
+            content: `📣 Pedido negado por **${interaction.user.tag}**.`,
+            embeds: [embed],
+            components: [publicButtons({ disabled: true })],
+          }).catch(() => null);
+        }
+      }
+
+      await safeNotifyDM(
+        req.userId,
+        `❌ Seu farme foi **NEGADO**.\nItem: **${req.itemLabel}**\nQuantidade: **${req.quantidade}**\nNegado por: **${interaction.user.tag}**\nMotivo: **${reason}**`
+      );
+
+      await sendLog(
+        interaction.guild,
+        `🔴 Negado | Membro: <@${req.userId}> | Por: <@${interaction.user.id}>\nItem: **${req.itemLabel}** | Quantidade: **${req.quantidade}**\nMotivo: **${reason}**`,
+        embed
+      );
+
+      return interaction.editReply({
+        content: "✅ Negado com motivo. Painel staff:",
+        components: [staffPanelButtons(requestId, is00(interaction.member, cfg))],
+      });
+    }
+
+    // ==================================================
+    // PAINEL STAFF
+    // ==================================================
+    if (interaction.isButton() && interaction.customId.startsWith("farme_staff_")) {
+      const [action, requestId] = interaction.customId.split(":");
+      const req = await getRequestByRequestId(interaction.guild.id, requestId);
+
+      if (!req) return interaction.reply({ content: "❌ Pedido não encontrado.", ephemeral: true });
+      if (!isStaff(interaction.member, cfg)) return interaction.reply({ content: "❌ Apenas staff.", ephemeral: true });
+
+      // ----------------------
+      // AJUSTAR -> abre modal
+      // ----------------------
+      if (action === "farme_staff_ajustar") {
+        if (!is00(interaction.member, cfg)) {
+          return interaction.reply({ content: "❌ Apenas o **00** pode ajustar valores.", ephemeral: true });
+        }
+        if (req.status === "pending") {
+          return interaction.reply({ content: "❌ Ajuste só depois de aprovar/negar.", ephemeral: true });
+        }
+
+        const modal = new ModalBuilder()
+          .setCustomId(`farme_modal_ajustar:${requestId}`)
+          .setTitle("Ajustar Farme (00)");
+
+        const opInput = new TextInputBuilder()
+          .setCustomId("op")
+          .setLabel('Operação: "+", "-", ou "set"')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(4);
+
+        const valInput = new TextInputBuilder()
+          .setCustomId("val")
+          .setLabel("Valor (ex: 40)")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(10);
+
+        const noteInput = new TextInputBuilder()
+          .setCustomId("note")
+          .setLabel("Observação (opcional)")
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(false)
+          .setMaxLength(200);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(opInput),
+          new ActionRowBuilder().addComponents(valInput),
+          new ActionRowBuilder().addComponents(noteInput)
+        );
+
+        return interaction.showModal(modal);
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+
+      // ----------------------
+      // FECHAR CANAL
+      // ----------------------
+      if (action === "farme_staff_fechar") {
+        if (req.status === "pending") return interaction.editReply("❌ Você precisa aprovar/negar antes de fechar.");
+        if (req.status === "closed") return interaction.editReply("⚠️ Já está fechado. Use Encerrar.");
+
+        const channel = await interaction.guild.channels.fetch(req.channelId).catch(() => null);
+        if (!channel) return interaction.editReply("❌ Canal não encontrado.");
+
+        await channel.permissionOverwrites.edit(req.userId, { ViewChannel: false }).catch(() => null);
+        if (cfg.CLOSED_CATEGORY_ID) {
+          await channel.setParent(cfg.CLOSED_CATEGORY_ID).catch(() => null);
+        }
+        await channel.setName(`fechado-${channel.name}`.slice(0, 90)).catch(() => null);
+        await channel.send(`🔒 Canal fechado por <@${interaction.user.id}>. (Agora só staff vê.)`).catch(() => null);
+
+        await pool.query(
+          `UPDATE farme_requests
+           SET status='closed',
+               "closedAt"=NOW(),
+               "closedById"=$1,
+               "closedByTag"=$2
+           WHERE "guildId"=$3 AND "requestId"=$4`,
+          [interaction.user.id, interaction.user.tag, interaction.guild.id, requestId]
+        );
+
+        return interaction.editReply("✅ Canal fechado (sumiu pro membro). Agora você pode **Encerrar**.");
+      }
+
+      // ----------------------
+      // ENCERRAR CANAL
+      // ----------------------
+      if (action === "farme_staff_encerrar") {
+        if (req.status !== "closed") return interaction.editReply("❌ Você precisa Fechar antes de Encerrar.");
+
+        const channel = await interaction.guild.channels.fetch(req.channelId).catch(() => null);
+        if (!channel) {
+          await pool.query(`DELETE FROM farme_requests WHERE "guildId"=$1 AND "requestId"=$2`, [
+            interaction.guild.id,
+            requestId,
+          ]);
+          return interaction.editReply("⚠️ Canal já não existe. Limpei do histórico.");
+        }
+
+        await pool.query(`DELETE FROM farme_requests WHERE "guildId"=$1 AND "requestId"=$2`, [
+          interaction.guild.id,
+          requestId,
+        ]);
+
+        await interaction.editReply("🗑️ Encerrando e deletando o canal...");
+        await channel.delete(`Encerrado por ${interaction.user.tag}`).catch(() => null);
+        return;
+      }
+
+      return interaction.editReply("⚠️ Ação desconhecida.");
+    }
+
+    // ==================================================
+    // MODAL AJUSTAR (00)
+    // ==================================================
+    if (interaction.isModalSubmit() && interaction.customId.startsWith("farme_modal_ajustar:")) {
+      await interaction.deferReply({ ephemeral: true });
+
+      if (!is00(interaction.member, cfg)) {
+        return interaction.editReply("❌ Apenas o **00** pode ajustar.");
+      }
+
+      const requestId = interaction.customId.split(":")[1];
+      const req = await getRequestByRequestId(interaction.guild.id, requestId);
+      if (!req) return interaction.editReply("❌ Pedido não encontrado.");
+
+      const op = (interaction.fields.getTextInputValue("op") || "").trim().toLowerCase();
+      const valStr = (interaction.fields.getTextInputValue("val") || "").trim();
+      const note = (interaction.fields.getTextInputValue("note") || "").trim();
+
+      const val = parseInt(valStr, 10);
+      if (!["+", "-", "set"].includes(op)) return interaction.editReply('❌ Operação inválida. Use: "+", "-", ou "set".');
+      if (!Number.isFinite(val)) return interaction.editReply("❌ Valor inválido. Ex: 40");
+
+      let delta = 0;
+      if (op === "+") delta = val;
+      if (op === "-") delta = -val;
+      if (op === "set") delta = val - Number(req.quantidade || 0);
+
+      const novaQuantidade = Math.max(0, Number(req.quantidade || 0) + delta);
+
+      await pool.query(
+        `UPDATE farme_requests
+         SET quantidade=$1,
+             "adjustedAt"=NOW(),
+             "adjustedById"=$2,
+             "adjustedByTag"=$3,
+             "adjustedDelta"=COALESCE("adjustedDelta",0) + $4,
+             "adjustedNote"=$5
+         WHERE "guildId"=$6 AND "requestId"=$7`,
+        [
+          novaQuantidade,
+          interaction.user.id,
+          interaction.user.tag,
+          delta,
+          `Op: ${op} ${val} | Delta: ${delta}${note ? ` | Nota: ${note}` : ""}`,
+          interaction.guild.id,
+          requestId,
+        ]
+      );
+
+      // se já estava aprovado, ajusta totals
+      if (req.status === "approved" || req.status === "closed") {
+        await addTotals(interaction.guild.id, req.userId, req.itemValue, delta);
+      }
+
+      const req2 = await getRequestByRequestId(interaction.guild.id, requestId);
+
+      const channel = await interaction.guild.channels.fetch(req.channelId).catch(() => null);
+      if (channel && channel.isTextBased()) {
+        const msg = await channel.messages.fetch(req.messageId).catch(() => null);
+        if (msg) {
+          const statusTxt =
+            req2.status === "approved" ? "🟢 Aprovado" :
+            req2.status === "denied" ? "🔴 Negado" :
+            req2.status === "closed" ? "🔒 Fechado" : "🟡 Pendente";
+
+          const embed = makeRequestEmbed({
+            userTag: req2.userTag,
+            userId: req2.userId,
+            itemLabel: req2.itemLabel,
+            quantidade: req2.quantidade,
+            status: statusTxt,
+            approverTag: req2.decidedByTag || null,
+            reason: req2.denyReason || null,
+            adjustedInfo: req2.adjustedNote || null,
+          }).setImage(req2.printUrl);
+
+          await msg.edit({ embeds: [embed] }).catch(() => null);
+        }
+      }
+
+      await safeNotifyDM(
+        req2.userId,
+        `🛠️ Seu farme foi **AJUSTADO** pelo 00.\nItem: **${req2.itemLabel}**\nNovo valor: **${req2.quantidade}**\nDetalhes: ${req2.adjustedNote || "-"}`
+      );
+
+      await updatePanelsAfterChange(interaction.guild, req2.userId);
+
+      return interaction.editReply(
+        `✅ Ajustado com sucesso. Delta aplicado: **${delta}**. Novo total do pedido: **${req2.quantidade}**`
+      );
+    }
+  } catch (err) {
+    console.error("🔥 interactionCreate ERROR:", err);
+    if (interaction.isRepliable()) {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ content: "❌ Deu erro. Olha o console do Render.", ephemeral: true }).catch(() => null);
+      } else {
+        await interaction.reply({ content: "❌ Deu erro. Olha o console do Render.", ephemeral: true }).catch(() => null);
+      }
+    }
   }
 });
 
-// ==========================
+// ======================================================
 // START
-// ==========================
+// ======================================================
 (async () => {
   try {
+    console.log("🚀 Iniciando bot...");
+
     await initDB();
-    await client.login(process.env.DISCORD_TOKEN);
-  } catch (e) {
-    console.error("Falha ao iniciar:", e?.stack || e);
+
+    registerCommands()
+      .then(() => console.log("✅ registerCommands terminou"))
+      .catch((e) => console.error("❌ registerCommands falhou:", e?.rawError || e));
+
+    console.log("🔑 Fazendo login no Discord...");
+
+    const loginTimeout = setTimeout(() => {
+      console.error("❌ Login travou por 30s. Reiniciando processo...");
+      process.exit(1);
+    }, 30_000);
+
+    client.login(process.env.DISCORD_TOKEN)
+      .then(() => {
+        clearTimeout(loginTimeout);
+        console.log("✅ login() resolveu. Aguardando READY...");
+      })
+      .catch((e) => {
+        clearTimeout(loginTimeout);
+        console.error("❌ LOGIN ERROR:", e?.rawError || e);
+        process.exit(1);
+      });
+  } catch (err) {
+    console.error("❌ ERRO AO INICIAR BOT:", err);
     process.exit(1);
   }
 })();
