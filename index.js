@@ -29,7 +29,9 @@ const {
 // ======================================================
 const app = express();
 app.get("/", (req, res) => res.send("Bot online ✅"));
-app.listen(process.env.PORT || 3000, "0.0.0.0");
+app.listen(process.env.PORT || 3000, "0.0.0.0", () => {
+  console.log(`Web OK na porta ${process.env.PORT || 3000}`);
+});
 
 // ======================================================
 // ✅ ENV
@@ -76,8 +78,12 @@ const CONFIGS = {
     LOG_CHANNEL_ID: "1478991741766864906",
     REPORT_CHANNEL_ID: "1479024598166012007",
     STAFF_TABLE_CHANNEL_ID: "1479158423684649167",
-    LEADERBOARD_CHANNEL_ID: "1479185447367479389",
-    PRODUCTIVITY_CHANNEL_ID: "1479185862196461638",
+
+    // 1479185447367479389 = painel semanal bonito por membro
+    WEEKLY_PANEL_CHANNEL_ID: "1479185447367479389",
+
+    // 1479185862196461638 = painel diário bonito por membro
+    DAILY_PANEL_CHANNEL_ID: "1479185862196461638",
 
     CLOSED_CATEGORY_ID: "",
     DAILY_DM_WHITELIST: [],
@@ -88,14 +94,14 @@ const CONFIGS = {
 
     ROLE_00_ID: "1469111029161136392",
     GERENTE_ROLE_ID: "1469111029161136386",
-    ROLE_MEMBRO_ID: "",
+    ROLE_MEMBRO_ID: "1469111029144223913",
 
-    FARME_CATEGORY_ID: "",
+    FARME_CATEGORY_ID: "1479371659616981022",
     LOG_CHANNEL_ID: "1478096038114885704",
-    REPORT_CHANNEL_ID: "",
-    STAFF_TABLE_CHANNEL_ID: "",
-    LEADERBOARD_CHANNEL_ID: "",
-    PRODUCTIVITY_CHANNEL_ID: "",
+    REPORT_CHANNEL_ID: "1478556681070706951",
+    STAFF_TABLE_CHANNEL_ID: "1479371176529756271",
+    WEEKLY_PANEL_CHANNEL_ID: "1479362819639083110",
+    DAILY_PANEL_CHANNEL_ID: "1479362995539808286",
 
     CLOSED_CATEGORY_ID: "",
     DAILY_DM_WHITELIST: [],
@@ -121,6 +127,10 @@ const FARME_OPTIONS = [
   { label: "Saco Ziplock", value: "saco-ziplock", description: "Canal privado: Saco Ziplock" },
   { label: "Folha Bruta", value: "folha-bruta", description: "Canal privado: Folha Bruta" },
 ];
+
+const TOTAL_TABLES = new Set(["farme_daily_totals", "farme_weekly_totals"]);
+const PANEL_PREFIX_DAILY = "panel_daily:";
+const PANEL_PREFIX_WEEKLY = "panel_weekly:";
 
 // ======================================================
 // 🤖 CLIENT
@@ -178,7 +188,8 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_farme_requests_status
     ON farme_requests ("guildId",status);
 
-    CREATE TABLE IF NOT EXISTS farme_daily_checks (
+    -- histórico diário para tabela /testardiario e metas do dia
+    CREATE TABLE IF NOT EXISTS farme_daily_routes (
       id BIGSERIAL PRIMARY KEY,
       "guildId" TEXT NOT NULL,
       "dateKey" TEXT NOT NULL,
@@ -188,6 +199,7 @@ async function initDB() {
       UNIQUE ("guildId","dateKey","userId","itemValue")
     );
 
+    -- painel diário por quantidade real
     CREATE TABLE IF NOT EXISTS farme_daily_totals (
       id BIGSERIAL PRIMARY KEY,
       "guildId" TEXT NOT NULL,
@@ -197,6 +209,7 @@ async function initDB() {
       UNIQUE ("guildId","userId","itemValue")
     );
 
+    -- painel semanal por quantidade real
     CREATE TABLE IF NOT EXISTS farme_weekly_totals (
       id BIGSERIAL PRIMARY KEY,
       "guildId" TEXT NOT NULL,
@@ -231,6 +244,8 @@ async function initDB() {
       UNIQUE ("guildId", chave)
     );
   `);
+
+  console.log("DB OK");
 }
 
 // ======================================================
@@ -264,6 +279,10 @@ function parseItemFromChannelName(channelName) {
   if (parts.length < 3) return null;
   const item = parts.slice(1, parts.length - 1).join("-");
   return FARME_OPTIONS.find((o) => o.value === item) || null;
+}
+
+function getItemLabel(itemValue) {
+  return FARME_OPTIONS.find((o) => o.value === itemValue)?.label || itemValue;
 }
 
 function channelLink(guildId, channelId) {
@@ -353,7 +372,7 @@ function staffPanelButtons(requestId, canAdjust) {
 
   const adjust = new ButtonBuilder()
     .setCustomId(`farme_staff_ajustar:${requestId}`)
-    .setLabel("Ajustar (00)")
+    .setLabel("Ajustar Farme (00)")
     .setStyle(ButtonStyle.Primary)
     .setDisabled(!canAdjust);
 
@@ -378,7 +397,8 @@ function getHelpEmbedFor(member, cfg) {
   ];
 
   const extra00Cmds = [
-    { name: "Ajustar (00)", desc: "No painel do canal, botão Ajustar (00) após aprovar/negar." },
+    { name: "/ajustarrota", desc: "Ajusta a rota do dia manualmente (+, -, set), inclusive negativo." },
+    { name: "Ajustar Farme (00)", desc: "No painel do canal, botão Ajustar Farme (00)." },
   ];
 
   const fmt = (arr) => arr.map((c) => `• **${c.name}** — ${c.desc}`).join("\n");
@@ -452,6 +472,10 @@ async function getCooldownRemaining(guildId, userId) {
 }
 
 async function addPeriodTotal(tableName, guildId, userId, itemValue, quantidade) {
+  if (!TOTAL_TABLES.has(tableName)) {
+    throw new Error(`Tabela inválida: ${tableName}`);
+  }
+
   await pool.query(
     `INSERT INTO ${tableName} ("guildId","userId","itemValue",total)
      VALUES ($1,$2,$3,$4)
@@ -469,20 +493,33 @@ async function addWeeklyTotals(guildId, userId, itemValue, quantidade) {
   await addPeriodTotal("farme_weekly_totals", guildId, userId, itemValue, quantidade);
 }
 
-async function markApprovedToday(guildId, userId, itemValue, quantidade) {
+async function addDailyRouteCount(guildId, userId, itemValue, delta) {
   const dk = dateKeyNow();
+
   await pool.query(
-    `INSERT INTO farme_daily_checks ("guildId","dateKey","userId","itemValue",total)
+    `INSERT INTO farme_daily_routes ("guildId","dateKey","userId","itemValue",total)
      VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT ("guildId","dateKey","userId","itemValue")
-     DO UPDATE SET total = farme_daily_checks.total + EXCLUDED.total`,
-    [guildId, dk, userId, itemValue, quantidade]
+     DO UPDATE SET total = farme_daily_routes.total + EXCLUDED.total`,
+    [guildId, dk, userId, itemValue, delta]
+  );
+}
+
+async function setDailyRouteCount(guildId, userId, itemValue, value) {
+  const dk = dateKeyNow();
+
+  await pool.query(
+    `INSERT INTO farme_daily_routes ("guildId","dateKey","userId","itemValue",total)
+     VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT ("guildId","dateKey","userId","itemValue")
+     DO UPDATE SET total = EXCLUDED.total`,
+    [guildId, dk, userId, itemValue, value]
   );
 }
 
 async function getApprovedCount(guildId, dateKey, userId, itemValue) {
   const { rows } = await pool.query(
-    `SELECT total FROM farme_daily_checks
+    `SELECT total FROM farme_daily_routes
      WHERE "guildId"=$1 AND "dateKey"=$2 AND "userId"=$3 AND "itemValue"=$4
      LIMIT 1`,
     [guildId, dateKey, userId, itemValue]
@@ -508,6 +545,10 @@ async function missStreakUntil(guildId, dateKey, userId, itemValue, maxLookbackD
 }
 
 async function getUserTotalsFromTable(tableName, guildId, userId) {
+  if (!TOTAL_TABLES.has(tableName)) {
+    throw new Error(`Tabela inválida: ${tableName}`);
+  }
+
   const { rows } = await pool.query(
     `SELECT "itemValue", total
      FROM ${tableName}
@@ -528,6 +569,10 @@ async function getUserTotalsFromTable(tableName, guildId, userId) {
 
 async function getUserDailyTotals(guildId, userId) {
   return getUserTotalsFromTable("farme_daily_totals", guildId, userId);
+}
+
+async function getUserWeeklyTotals(guildId, userId) {
+  return getUserTotalsFromTable("farme_weekly_totals", guildId, userId);
 }
 
 async function getRankingWeekly(guildId, limit = 10) {
@@ -641,104 +686,104 @@ async function cleanupDB() {
 }
 
 // ======================================================
-// 📌 LEADERBOARD FIXA (SEMANAL)
+// 📊 PAINÉIS FIXOS POR MEMBRO
 // ======================================================
-function buildLeaderboardEmbed(guild, rows) {
-  const desc = rows.length
-    ? rows
-        .map((e, i) => {
-          const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "🔸";
-          return `${medal} **${i + 1}.** <@${e.userId}> — **${e.total}**`;
-        })
-        .join("\n")
-    : "Ainda não tem farmes aprovados nesta semana.";
-
-  return new EmbedBuilder()
-    .setTitle("🏆 Leaderboard Semanal de Farmes")
-    .setDescription(desc)
-    .setFooter({ text: `Atualizado automaticamente • ${guild.name}` })
-    .setTimestamp(new Date());
-}
-
-async function updateLeaderboardFixed(guild) {
-  const cfg = getCfg(guild.id);
-  if (!cfg?.LEADERBOARD_CHANNEL_ID) return;
-
-  const channel = await guild.channels.fetch(cfg.LEADERBOARD_CHANNEL_ID).catch(() => null);
-  if (!channel || !channel.isTextBased()) return;
-
-  const rows = await getRankingWeekly(guild.id, 10);
-  const embed = buildLeaderboardEmbed(guild, rows);
-
-  const existingId = await getFixedMessage(guild.id, "leaderboardMessageId");
-  if (existingId) {
-    const msg = await channel.messages.fetch(existingId).catch(() => null);
-    if (msg) {
-      await msg.edit({ content: "📌 **Ranking semanal (auto)**", embeds: [embed] }).catch(() => null);
-      return;
-    }
-  }
-
-  const created = await channel.send({ content: "📌 **Ranking semanal (auto)**", embeds: [embed] }).catch(() => null);
-  if (created) {
-    await setFixedMessage(guild.id, "leaderboardMessageId", created.id);
-  }
-}
-
-// ======================================================
-// 📊 PRODUTIVIDADE FIXA (DIÁRIA)
-// ======================================================
-function buildProductivityEmbedFor(guild, userId, totals) {
+function buildQuantityPanelEmbed({ title, userId, totals, footerText }) {
   const lines = FARME_OPTIONS.map((o) => `• **${o.label}:** ${totals.items[o.value] || 0}`).join("\n");
 
   return new EmbedBuilder()
-    .setTitle("📊 Painel de Produtividade (Diário)")
+    .setTitle(title)
     .setDescription(`👤 <@${userId}>\n\n${lines}`)
-    .addFields({ name: "🏁 Total do dia", value: String(totals.total || 0), inline: true })
-    .setFooter({ text: `Zera todo dia às 03:05 • ${guild.name}` })
+    .addFields({ name: "🏁 Total", value: String(totals.total || 0), inline: true })
+    .setFooter({ text: footerText })
     .setTimestamp(new Date());
 }
 
-async function updateProductivityPanelFor(guild, userId) {
-  const cfg = getCfg(guild.id);
-  if (!cfg?.PRODUCTIVITY_CHANNEL_ID) return;
+async function upsertUserPanelMessage({
+  guild,
+  channelId,
+  keyPrefix,
+  userId,
+  embed,
+  content = null,
+}) {
+  if (!channelId) return;
 
-  const channel = await guild.channels.fetch(cfg.PRODUCTIVITY_CHANNEL_ID).catch(() => null);
+  const channel = await guild.channels.fetch(channelId).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
 
-  const totals = await getUserDailyTotals(guild.id, userId);
-  const embed = buildProductivityEmbedFor(guild, userId, totals);
-
-  const key = `productivity:${userId}`;
+  const key = `${keyPrefix}${userId}`;
   const existingId = await getFixedMessage(guild.id, key);
 
   if (existingId) {
     const msg = await channel.messages.fetch(existingId).catch(() => null);
     if (msg) {
-      await msg.edit({ embeds: [embed] }).catch(() => null);
+      await msg.edit({ content, embeds: [embed] }).catch(() => null);
       return;
     }
   }
 
-  const created = await channel.send({ embeds: [embed] }).catch(() => null);
+  const created = await channel.send({ content, embeds: [embed] }).catch(() => null);
   if (created) {
     await setFixedMessage(guild.id, key, created.id);
   }
 }
 
-async function updatePanelsAfterChange(guild, userId) {
-  await updateLeaderboardFixed(guild).catch(() => null);
-  await updateProductivityPanelFor(guild, userId).catch(() => null);
+async function updateDailyPanelFor(guild, userId) {
+  const cfg = getCfg(guild.id);
+  if (!cfg?.DAILY_PANEL_CHANNEL_ID) return;
+
+  const totals = await getUserDailyTotals(guild.id, userId);
+  const embed = buildQuantityPanelEmbed({
+    title: "📊 Painel Diário de Produção",
+    userId,
+    totals,
+    footerText: `Zera todo dia às 03:05 • ${guild.name}`,
+  });
+
+  await upsertUserPanelMessage({
+    guild,
+    channelId: cfg.DAILY_PANEL_CHANNEL_ID,
+    keyPrefix: PANEL_PREFIX_DAILY,
+    userId,
+    embed,
+  });
 }
 
-async function refreshAllExistingProductivityPanels(guild) {
-  const rows = await getFixedMessagesByPrefix(guild.id, "productivity:");
+async function updateWeeklyPanelFor(guild, userId) {
+  const cfg = getCfg(guild.id);
+  if (!cfg?.WEEKLY_PANEL_CHANNEL_ID) return;
+
+  const totals = await getUserWeeklyTotals(guild.id, userId);
+  const embed = buildQuantityPanelEmbed({
+    title: "🏆 Painel Semanal de Produção",
+    userId,
+    totals,
+    footerText: `Zera toda segunda às 03:05 • ${guild.name}`,
+  });
+
+  await upsertUserPanelMessage({
+    guild,
+    channelId: cfg.WEEKLY_PANEL_CHANNEL_ID,
+    keyPrefix: PANEL_PREFIX_WEEKLY,
+    userId,
+    embed,
+  });
+}
+
+async function refreshAllExistingPanelsByPrefix(guild, prefix, updaterFn) {
+  const rows = await getFixedMessagesByPrefix(guild.id, prefix);
   for (const row of rows) {
-    const userId = row.chave.replace("productivity:", "");
+    const userId = row.chave.replace(prefix, "");
     if (userId) {
-      await updateProductivityPanelFor(guild, userId).catch(() => null);
+      await updaterFn(guild, userId).catch(() => null);
     }
   }
+}
+
+async function updatePanelsAfterChange(guild, userId) {
+  await updateDailyPanelFor(guild, userId).catch(() => null);
+  await updateWeeklyPanelFor(guild, userId).catch(() => null);
 }
 
 // ======================================================
@@ -782,7 +827,7 @@ async function runDailyAuditAndReport() {
 
 async function resetDailyProductivity(guild) {
   await pool.query(`DELETE FROM farme_daily_totals WHERE "guildId"=$1`, [guild.id]);
-  await refreshAllExistingProductivityPanels(guild);
+  await refreshAllExistingPanelsByPrefix(guild, PANEL_PREFIX_DAILY, updateDailyPanelFor);
 }
 
 async function sendWeeklyRankingReportAndReset(guild) {
@@ -791,7 +836,6 @@ async function sendWeeklyRankingReportAndReset(guild) {
   const now = DateTime.now().setZone(TZ);
   const weekEnd = now.minus({ days: 1 });
   const weekStart = weekEnd.minus({ days: 6 });
-
   const periodText = `${weekStart.toFormat("dd/MM/yyyy")} até ${weekEnd.toFormat("dd/MM/yyyy")}`;
 
   const desc = ranking.length
@@ -821,7 +865,7 @@ async function sendWeeklyRankingReportAndReset(guild) {
   );
 
   await pool.query(`DELETE FROM farme_weekly_totals WHERE "guildId"=$1`, [guild.id]);
-  await updateLeaderboardFixed(guild);
+  await refreshAllExistingPanelsByPrefix(guild, PANEL_PREFIX_WEEKLY, updateWeeklyPanelFor);
 }
 
 async function dailySchedulerRun() {
@@ -882,6 +926,36 @@ const commands = [
       opt.setName("data").setDescription('Se "dia" = data, coloque aqui: YYYY-MM-DD').setRequired(false)
     ),
 
+  new SlashCommandBuilder()
+    .setName("ajustarrota")
+    .setDescription("(00) Ajusta a rota do dia manualmente.")
+    .addUserOption((opt) =>
+      opt.setName("membro").setDescription("Membro que será ajustado").setRequired(true)
+    )
+    .addStringOption((opt) =>
+      opt
+        .setName("item")
+        .setDescription("Item/rota")
+        .setRequired(true)
+        .addChoices(
+          ...FARME_OPTIONS.map((o) => ({ name: o.label, value: o.value }))
+        )
+    )
+    .addStringOption((opt) =>
+      opt
+        .setName("operacao")
+        .setDescription('Operação: "+", "-", ou "set"')
+        .setRequired(true)
+        .addChoices(
+          { name: "+", value: "+" },
+          { name: "-", value: "-" },
+          { name: "set", value: "set" }
+        )
+    )
+    .addIntegerOption((opt) =>
+      opt.setName("valor").setDescription("Valor do ajuste").setRequired(true)
+    ),
+
   new SlashCommandBuilder().setName("ajuda").setDescription("Mostra os comandos disponíveis para o seu cargo."),
 ].map((c) => c.toJSON());
 
@@ -901,6 +975,8 @@ async function registerCommands() {
 // READY
 // ======================================================
 client.once("clientReady", async () => {
+  console.log(`BOT ONLINE: ${client.user.tag}`);
+
   await cleanupDB().catch(() => null);
   setInterval(() => cleanupDB().catch(() => null), CLEANUP_EVERY_MS);
 
@@ -912,19 +988,7 @@ client.once("clientReady", async () => {
     { timezone: TZ }
   );
 
-  cron.schedule(
-    "*/5 * * * *",
-    async () => {
-      for (const guild of client.guilds.cache.values()) {
-        await updateLeaderboardFixed(guild).catch(() => null);
-      }
-    },
-    { timezone: TZ }
-  );
-
-  for (const guild of client.guilds.cache.values()) {
-    await updateLeaderboardFixed(guild).catch(() => null);
-  }
+  console.log(`Jobs ativos: reset diário 03:05 e reset semanal segunda 03:05 (${TZ})`);
 });
 
 // ======================================================
@@ -991,7 +1055,7 @@ client.on("interactionCreate", async (interaction) => {
         `📌 **Tabela de metas** solicitada por <@${interaction.user.id}> — Data: **${dk}**\n` +
         `Cargos: ${trackedRolesTxt || "não configurados"}\n` +
         `Total encontrados: **${targets.size}**\n` +
-        `Legenda: **Rotas no dia** = quantidade aprovada no dia | **Rota completa** = dias seguidos faltando (0 se fez no dia).`;
+        `Legenda: **Rotas no dia** = aprovações do item no dia (pode ficar negativo se o 00 ajustar) | **Rota completa** = dias seguidos faltando (0 se fez no dia).`;
 
       const pages = splitIntoPages(rows.length ? rows : ["⚠️ Ninguém encontrado nesses cargos."], 3500);
       const embeds = pages.slice(0, 8).map((txt, idx) =>
@@ -1005,6 +1069,55 @@ client.on("interactionCreate", async (interaction) => {
       if (!ok) return interaction.editReply("❌ STAFF_TABLE_CHANNEL_ID não configurado nesse servidor.");
 
       return interaction.editReply("✅ Postei a tabela no canal staff.");
+    }
+
+    // /ajustarrota
+    if (interaction.isChatInputCommand() && interaction.commandName === "ajustarrota") {
+      await interaction.deferReply({ ephemeral: true });
+
+      if (!is00(member, cfg)) {
+        return interaction.editReply("❌ Apenas o **00** pode ajustar rota.");
+      }
+
+      const targetUser = interaction.options.getUser("membro", true);
+      const itemValue = interaction.options.getString("item", true);
+      const operacao = interaction.options.getString("operacao", true);
+      const valor = interaction.options.getInteger("valor", true);
+
+      if (targetUser.bot) {
+        return interaction.editReply("❌ Não pode ajustar rota de bot.");
+      }
+
+      let delta = 0;
+      let novo = 0;
+      const atual = await getApprovedCount(interaction.guild.id, dateKeyNow(), targetUser.id, itemValue);
+
+      if (operacao === "+") {
+        delta = valor;
+        novo = atual + delta;
+        await addDailyRouteCount(interaction.guild.id, targetUser.id, itemValue, delta);
+      } else if (operacao === "-") {
+        delta = -valor;
+        novo = atual + delta;
+        await addDailyRouteCount(interaction.guild.id, targetUser.id, itemValue, delta);
+      } else if (operacao === "set") {
+        novo = valor;
+        delta = novo - atual;
+        await setDailyRouteCount(interaction.guild.id, targetUser.id, itemValue, novo);
+      } else {
+        return interaction.editReply("❌ Operação inválida.");
+      }
+
+      const itemLabel = getItemLabel(itemValue);
+
+      await sendLog(
+        interaction.guild,
+        `🛠️ Ajuste de rota do dia | 00: <@${interaction.user.id}> | Membro: <@${targetUser.id}> | Item: **${itemLabel}** | Operação: **${operacao} ${valor}** | Resultado: **${novo}**`
+      );
+
+      return interaction.editReply(
+        `✅ Rota ajustada.\nMembro: <@${targetUser.id}>\nItem: **${itemLabel}**\nAntes: **${atual}**\nDepois: **${novo}**`
+      );
     }
 
     // /farme
@@ -1200,16 +1313,14 @@ client.on("interactionCreate", async (interaction) => {
 
       await upsertChannelMap(interaction.guild.id, interaction.user.id, selected, targetChannel.id);
 
-      if (targetChannel && targetChannel.messages) {
-        const fetched = await targetChannel.messages.fetch({ limit: 5 }).catch(() => null);
-        if (!fetched || fetched.size === 0) {
-          await targetChannel.send(
-            `👋 ${interaction.user}\n` +
-              `✅ Canal privado de **${opt.label}** criado.\n\n` +
-              `📌 Envie seu farme usando:\n` +
-              `**/enviarfarme quantidade: <número> print: <anexo>**`
-          ).catch(() => null);
-        }
+      const fetched = await targetChannel.messages.fetch({ limit: 5 }).catch(() => null);
+      if (!fetched || fetched.size === 0) {
+        await targetChannel.send(
+          `👋 ${interaction.user}\n` +
+            `✅ Canal privado de **${opt.label}** criado.\n\n` +
+            `📌 Envie seu farme usando:\n` +
+            `**/enviarfarme quantidade: <número> print: <anexo>**`
+        ).catch(() => null);
       }
 
       const goBtn = new ButtonBuilder()
@@ -1237,7 +1348,7 @@ client.on("interactionCreate", async (interaction) => {
       if (!req) return interaction.editReply("❌ Não encontrei essa solicitação no banco.");
 
       if (req.userId === interaction.user.id) {
-        return interaction.editReply("❌ Você não pode **aprovar o seu próprio farme**.");
+        return interaction.editReply("❌ Você não pode **aprovar seu próprio farme**.");
       }
 
       if (req.status !== "pending") {
@@ -1257,9 +1368,12 @@ client.on("interactionCreate", async (interaction) => {
         [interaction.user.id, interaction.user.tag, interaction.guild.id, requestId]
       );
 
-      await markApprovedToday(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
+      // quantidade real
       await addDailyTotals(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
       await addWeeklyTotals(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
+
+      // rota do dia = conta só +1 por aprovação
+      await addDailyRouteCount(interaction.guild.id, req.userId, req.itemValue, 1);
 
       const embed = makeRequestEmbed({
         userTag: req.userTag,
@@ -1286,7 +1400,7 @@ client.on("interactionCreate", async (interaction) => {
 
       await sendLog(
         interaction.guild,
-        `🟢 Aprovado | Membro: <@${req.userId}> | Por: <@${interaction.user.id}>\nItem: **${req.itemLabel}** | Quantidade: **${req.quantidade}**`,
+        `🟢 Aprovado | Membro: <@${req.userId}> | Por: <@${interaction.user.id}>\nItem: **${req.itemLabel}** | Quantidade: **${req.quantidade}** | Rota do dia +1`,
         embed
       );
 
@@ -1309,7 +1423,7 @@ client.on("interactionCreate", async (interaction) => {
       if (!req) return interaction.reply({ content: "❌ Pedido não encontrado.", ephemeral: true });
 
       if (req.userId === interaction.user.id) {
-        return interaction.reply({ content: "❌ Você não pode **negar o seu próprio farme**.", ephemeral: true });
+        return interaction.reply({ content: "❌ Você não pode **negar seu próprio farme**.", ephemeral: true });
       }
 
       if (req.status !== "pending") {
@@ -1346,7 +1460,7 @@ client.on("interactionCreate", async (interaction) => {
       if (!req) return interaction.editReply("❌ Pedido não encontrado.");
 
       if (req.userId === interaction.user.id) {
-        return interaction.editReply("❌ Você não pode **negar o seu próprio farme**.");
+        return interaction.editReply("❌ Você não pode **negar seu próprio farme**.");
       }
 
       if (req.status !== "pending") {
@@ -1516,7 +1630,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.editReply("⚠️ Ação desconhecida.");
     }
 
-    // MODAL AJUSTAR (00)
+    // MODAL AJUSTAR FARME (00)
     if (interaction.isModalSubmit() && interaction.customId.startsWith("farme_modal_ajustar:")) {
       await interaction.deferReply({ ephemeral: true });
 
