@@ -21,6 +21,7 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  MessageFlags,
 } = require("discord.js");
 
 // ======================================================
@@ -161,6 +162,7 @@ async function initDB() {
       "itemLabel" TEXT NOT NULL,
       quantidade INTEGER NOT NULL DEFAULT 0,
       "originalQuantidade" INTEGER NOT NULL DEFAULT 0,
+      quantities JSONB NOT NULL DEFAULT '{}'::jsonb,
       "printUrl" TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
       "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -253,6 +255,11 @@ async function initDB() {
       "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE ("guildId","channelId","userId")
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE farme_requests
+    ADD COLUMN IF NOT EXISTS quantities JSONB NOT NULL DEFAULT '{}'::jsonb
   `);
 
   console.log("DB OK");
@@ -373,7 +380,7 @@ function publicButtons({ disabled = false } = {}) {
   return new ActionRowBuilder().addComponents(approve, deny);
 }
 
-function staffPanelButtons(requestId, canAdjust) {
+function staffPanelButtons(requestId, canAdjust, disableAdjust = false) {
   const close = new ButtonBuilder()
     .setCustomId(`farme_staff_fechar:${requestId}`)
     .setLabel("Fechar Canal")
@@ -388,7 +395,7 @@ function staffPanelButtons(requestId, canAdjust) {
     .setCustomId(`farme_staff_ajustar:${requestId}`)
     .setLabel("Ajustar Farme (00)")
     .setStyle(ButtonStyle.Primary)
-    .setDisabled(!canAdjust);
+    .setDisabled(!canAdjust || disableAdjust);
 
   return new ActionRowBuilder().addComponents(close, end, adjust);
 }
@@ -412,7 +419,7 @@ function getHelpEmbedFor(member, cfg) {
 
   const extra00Cmds = [
     { name: "/ajustarrota", desc: "Ajusta a rota do dia manualmente (+, -, set), inclusive negativo." },
-    { name: "Ajustar Farme (00)", desc: "No painel do canal, botão Ajustar Farme (00)." },
+    { name: "Ajustar Farme (00)", desc: "No painel do canal, botão Ajustar Farme (00) para pedido simples." },
   ];
 
   const fmt = (arr) => arr.map((c) => `• **${c.name}** — ${c.desc}`).join("\n");
@@ -446,6 +453,64 @@ function normalizeDraftQuantities(raw) {
 
 function sumDraftQuantities(quantities) {
   return FARME_OPTIONS.reduce((acc, o) => acc + Number(quantities?.[o.value] || 0), 0);
+}
+
+function hasGroupedQuantities(quantities) {
+  if (!quantities || typeof quantities !== "object") return false;
+  return FARME_OPTIONS.some((o) => Number(quantities[o.value] || 0) > 0);
+}
+
+function formatGroupedItemsInline(quantities) {
+  return FARME_OPTIONS
+    .filter((o) => Number(quantities?.[o.value] || 0) > 0)
+    .map((o) => `${o.label}: ${Number(quantities[o.value] || 0)}`)
+    .join(" / ");
+}
+
+function formatGroupedItemsBlock(quantities) {
+  const rows = FARME_OPTIONS
+    .filter((o) => Number(quantities?.[o.value] || 0) > 0)
+    .map((o) => `• **${o.label}:** ${Number(quantities[o.value] || 0)}`);
+
+  return rows.length ? rows.join("\n") : "Nenhum item informado.";
+}
+
+function sumGroupedQuantities(quantities) {
+  return FARME_OPTIONS.reduce((acc, o) => acc + Number(quantities?.[o.value] || 0), 0);
+}
+
+function makeGroupedRequestEmbed({
+  userTag,
+  userId,
+  quantities,
+  status,
+  approverTag,
+  reason,
+  adjustedInfo,
+}) {
+  const embed = new EmbedBuilder()
+    .setTitle("📦 Solicitação de Farme")
+    .setDescription("Detalhes da solicitação abaixo.")
+    .addFields(
+      { name: "👤 Membro", value: `<@${userId}> (${userTag || userId})`, inline: false },
+      { name: "🧾 Itens", value: formatGroupedItemsBlock(quantities), inline: false },
+      { name: "📌 Status", value: status, inline: true }
+    )
+    .setTimestamp(new Date());
+
+  if (approverTag) {
+    embed.addFields({ name: "✅ Avaliado por", value: approverTag, inline: false });
+  }
+
+  if (reason) {
+    embed.addFields({ name: "📝 Motivo", value: reason, inline: false });
+  }
+
+  if (adjustedInfo) {
+    embed.addFields({ name: "🛠️ Ajuste (00)", value: adjustedInfo, inline: false });
+  }
+
+  return embed;
 }
 
 function buildFarmPanelEmbed(userId, quantities, hasPrint) {
@@ -497,7 +562,10 @@ async function getRequestByRequestId(guildId, requestId) {
     `SELECT * FROM farme_requests WHERE "guildId"=$1 AND "requestId"=$2 LIMIT 1`,
     [guildId, requestId]
   );
-  return rows[0] || null;
+  const row = rows[0] || null;
+  if (!row) return null;
+  row.quantities = normalizeDraftQuantities(row.quantities || {});
+  return row;
 }
 
 async function getLatestRequestByChannel(guildId, channelId) {
@@ -508,7 +576,10 @@ async function getLatestRequestByChannel(guildId, channelId) {
      LIMIT 1`,
     [guildId, channelId]
   );
-  return rows[0] || null;
+  const row = rows[0] || null;
+  if (!row) return null;
+  row.quantities = normalizeDraftQuantities(row.quantities || {});
+  return row;
 }
 
 async function upsertChannelMap(guildId, userId, itemValue, channelId) {
@@ -940,55 +1011,47 @@ async function createOrGetFarmChannel(guild, user, cfg) {
   return targetChannel;
 }
 
-async function createPendingRequestsFromDraft({ guild, channel, user, quantities, printUrl }) {
-  const created = [];
+async function createGroupedPendingRequest({ guild, channel, user, quantities, printUrl }) {
+  const normalized = normalizeDraftQuantities(quantities);
 
-  for (const opt of FARME_OPTIONS) {
-    const quantidade = Number(quantities?.[opt.value] || 0);
-    if (quantidade <= 0) continue;
+  const embed = makeGroupedRequestEmbed({
+    userTag: user.tag,
+    userId: user.id,
+    quantities: normalized,
+    status: "🟡 Pendente",
+  }).setImage(printUrl);
 
-    const embed = makeRequestEmbed({
-      userTag: user.tag,
-      userId: user.id,
-      itemLabel: opt.label,
-      quantidade,
-      status: "🟡 Pendente",
-    }).setImage(printUrl);
+  const msg = await channel.send({
+    content: `📣 Solicitação enviada por ${user}. (Aguardando **00/Gerente**)`,
+    embeds: [embed],
+    components: [publicButtons({ disabled: false })],
+  });
 
-    const msg = await channel.send({
-      content: `📣 Solicitação enviada por ${user}. (Aguardando **00/Gerente**)`,
-      embeds: [embed],
-      components: [publicButtons({ disabled: false })],
-    });
+  await pool.query(
+    `INSERT INTO farme_requests
+    ("guildId","requestId","messageId","channelId","userId","userTag","itemValue","itemLabel",quantidade,"originalQuantidade",quantities,"printUrl",status)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending')`,
+    [
+      guild.id,
+      msg.id,
+      msg.id,
+      channel.id,
+      user.id,
+      user.tag,
+      "farm-agrupado",
+      "Farm Agrupado",
+      sumGroupedQuantities(normalized),
+      sumGroupedQuantities(normalized),
+      normalized,
+      printUrl,
+    ]
+  );
 
-    await pool.query(
-      `INSERT INTO farme_requests
-      ("guildId","requestId","messageId","channelId","userId","userTag","itemValue","itemLabel",quantidade,"originalQuantidade","printUrl",status)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending')`,
-      [
-        guild.id,
-        msg.id,
-        msg.id,
-        channel.id,
-        user.id,
-        user.tag,
-        opt.value,
-        opt.label,
-        quantidade,
-        quantidade,
-        printUrl,
-      ]
-    );
-
-    created.push({
-      requestId: msg.id,
-      itemValue: opt.value,
-      itemLabel: opt.label,
-      quantidade,
-    });
-  }
-
-  return created;
+  return {
+    requestId: msg.id,
+    quantities: normalized,
+    total: sumGroupedQuantities(normalized),
+  };
 }
 
 // ======================================================
@@ -1271,6 +1334,7 @@ async function registerCommands() {
 
     for (const guildId of Object.keys(CONFIGS)) {
       await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId), { body: commands });
+      console.log(`Commands atualizados na guild ${guildId}`);
     }
   } catch (err) {
     console.error("ERRO ao registrar commands:", err?.rawError || err);
@@ -1304,7 +1368,7 @@ client.on("interactionCreate", async (interaction) => {
   try {
     if (!interaction.guild) {
       if (interaction.isRepliable()) {
-        return interaction.reply({ content: "❌ Use isso dentro de um servidor.", ephemeral: true }).catch(() => null);
+        return interaction.reply({ content: "❌ Use isso dentro de um servidor.", flags: MessageFlags.Ephemeral }).catch(() => null);
       }
       return;
     }
@@ -1312,7 +1376,7 @@ client.on("interactionCreate", async (interaction) => {
     const cfg = getCfg(interaction.guild.id);
     if (!cfg) {
       if (interaction.isRepliable()) {
-        return interaction.reply({ content: "❌ Esse servidor não está configurado.", ephemeral: true }).catch(() => null);
+        return interaction.reply({ content: "❌ Esse servidor não está configurado.", flags: MessageFlags.Ephemeral }).catch(() => null);
       }
       return;
     }
@@ -1321,14 +1385,14 @@ client.on("interactionCreate", async (interaction) => {
 
     // /ajuda
     if (interaction.isChatInputCommand() && interaction.commandName === "ajuda") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const embed = getHelpEmbedFor(member, cfg);
       return interaction.editReply({ embeds: [embed] });
     }
 
     // /testardiario
     if (interaction.isChatInputCommand() && interaction.commandName === "testardiario") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       if (!isStaff(member, cfg)) {
         return interaction.editReply({ content: "❌ Apenas 00/Gerente." });
@@ -1379,7 +1443,7 @@ client.on("interactionCreate", async (interaction) => {
 
     // /ajustarrota
     if (interaction.isChatInputCommand() && interaction.commandName === "ajustarrota") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       if (!is00(member, cfg)) {
         return interaction.editReply("❌ Apenas o **00** pode ajustar rota.");
@@ -1426,9 +1490,9 @@ client.on("interactionCreate", async (interaction) => {
       );
     }
 
-    // /farme -> abre canal privado único + painel FARM
+    // /farme
     if (interaction.isChatInputCommand() && interaction.commandName === "farme") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       if (!cfg.FARME_CATEGORY_ID) {
         return interaction.editReply({ content: "❌ FARME_CATEGORY_ID não configurado neste servidor." });
@@ -1450,7 +1514,7 @@ client.on("interactionCreate", async (interaction) => {
 
     // /gerenciarcanal
     if (interaction.isChatInputCommand() && interaction.commandName === "gerenciarcanal") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       if (!isStaff(member, cfg)) {
         return interaction.editReply({ content: "❌ Apenas 00/Gerente." });
@@ -1461,15 +1525,16 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.editReply({ content: "❌ Não encontrei nenhum pedido salvo para este canal." });
       }
 
+      const isGrouped = hasGroupedQuantities(latest.quantities || {});
       return interaction.editReply({
         content: `🛠️ Painel do canal atual (Pedido: ${latest.status})`,
-        components: [staffPanelButtons(latest.requestId, is00(member, cfg))],
+        components: [staffPanelButtons(latest.requestId, is00(member, cfg), isGrouped)],
       });
     }
 
-    // /enviarfarme (legado)
+    // /enviarfarme legado
     if (interaction.isChatInputCommand() && interaction.commandName === "enviarfarme") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       if (isFarmPanelChannel(interaction.channel?.name)) {
         return interaction.editReply({
@@ -1516,8 +1581,8 @@ client.on("interactionCreate", async (interaction) => {
 
       await pool.query(
         `INSERT INTO farme_requests
-        ("guildId","requestId","messageId","channelId","userId","userTag","itemValue","itemLabel",quantidade,"originalQuantidade","printUrl",status)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending')`,
+        ("guildId","requestId","messageId","channelId","userId","userTag","itemValue","itemLabel",quantidade,"originalQuantidade",quantities,"printUrl",status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending')`,
         [
           interaction.guild.id,
           requestId,
@@ -1529,6 +1594,7 @@ client.on("interactionCreate", async (interaction) => {
           opt.label,
           quantidade,
           quantidade,
+          {},
           print.url,
         ]
       );
@@ -1538,7 +1604,7 @@ client.on("interactionCreate", async (interaction) => {
 
     // /meusfarmes
     if (interaction.isChatInputCommand() && interaction.commandName === "meusfarmes") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       const totals = await getUserDailyTotals(interaction.guild.id, interaction.user.id);
       const lines = FARME_OPTIONS.map((o) => `• **${o.label}**: ${totals.items[o.value] || 0}`).join("\n");
@@ -1554,7 +1620,7 @@ client.on("interactionCreate", async (interaction) => {
 
     // /ranking
     if (interaction.isChatInputCommand() && interaction.commandName === "ranking") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       const entries = await getRankingWeekly(interaction.guild.id, 10);
       if (!entries.length) {
@@ -1576,7 +1642,7 @@ client.on("interactionCreate", async (interaction) => {
       const opt = FARME_OPTIONS.find((o) => o.value === itemValue);
 
       if (!opt) {
-        return interaction.reply({ content: "❌ Item inválido.", ephemeral: true });
+        return interaction.reply({ content: "❌ Item inválido.", flags: MessageFlags.Ephemeral });
       }
 
       const modal = new ModalBuilder()
@@ -1595,7 +1661,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (interaction.isButton() && interaction.customId === "farm_clear") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       await ensureDraft(interaction.guild.id, interaction.channelId, interaction.user.id);
       await clearDraft(interaction.guild.id, interaction.channelId, interaction.user.id);
@@ -1605,7 +1671,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (interaction.isButton() && interaction.customId === "farm_send") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       const remaining = await getCooldownRemaining(interaction.guild.id, interaction.user.id);
       if (remaining > 0) {
@@ -1628,7 +1694,7 @@ client.on("interactionCreate", async (interaction) => {
 
       await setCooldown(interaction.guild.id, interaction.user.id);
 
-      const created = await createPendingRequestsFromDraft({
+      const created = await createGroupedPendingRequest({
         guild: interaction.guild,
         channel: interaction.channel,
         user: interaction.user,
@@ -1636,14 +1702,10 @@ client.on("interactionCreate", async (interaction) => {
         printUrl,
       });
 
-      if (!created.length) {
-        return interaction.editReply("❌ Nada foi enviado.");
-      }
-
       await clearDraft(interaction.guild.id, interaction.channelId, interaction.user.id);
       await sendOrRefreshFarmPanel(interaction.channel, interaction.user.id);
 
-      const resumo = created.map((x) => `• **${x.itemLabel}**: ${x.quantidade}`).join("\n");
+      const resumo = formatGroupedItemsBlock(created.quantities);
 
       return interaction.editReply(
         `✅ Enviado para avaliação do **00/Gerente**.\n\n${resumo}`
@@ -1652,7 +1714,7 @@ client.on("interactionCreate", async (interaction) => {
 
     // MODAL QUANTIDADE DO PAINEL FARM
     if (interaction.isModalSubmit() && interaction.customId.startsWith("farm_modal_qty:")) {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       const itemValue = interaction.customId.split(":")[1];
       const opt = FARME_OPTIONS.find((o) => o.value === itemValue);
@@ -1673,7 +1735,7 @@ client.on("interactionCreate", async (interaction) => {
 
     // BOTÃO APROVAR
     if (interaction.isButton() && interaction.customId === "farme_public_aprovar") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       if (!isStaff(member, cfg)) {
         return interaction.editReply("❌ Apenas **00** ou **Gerente** pode aprovar/negar.");
@@ -1688,9 +1750,10 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       if (req.status !== "pending") {
+        const isGroupedExisting = hasGroupedQuantities(req.quantities || {});
         return interaction.editReply({
           content: "⚠️ Esse pedido já foi avaliado. Painel staff:",
-          components: [staffPanelButtons(requestId, is00(member, cfg))],
+          components: [staffPanelButtons(requestId, is00(member, cfg), isGroupedExisting)],
         });
       }
 
@@ -1704,19 +1767,42 @@ client.on("interactionCreate", async (interaction) => {
         [interaction.user.id, interaction.user.tag, interaction.guild.id, requestId]
       );
 
-      await addDailyTotals(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
-      await addWeeklyTotals(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
-      await addDailyRouteCount(interaction.guild.id, req.userId, req.itemValue, 1);
+      const groupedQuantities = normalizeDraftQuantities(req.quantities || {});
+      const isGrouped = hasGroupedQuantities(groupedQuantities);
 
-      const embed = makeRequestEmbed({
-        userTag: req.userTag,
-        userId: req.userId,
-        itemLabel: req.itemLabel,
-        quantidade: req.quantidade,
-        status: "🟢 Aprovado",
-        approverTag: interaction.user.tag,
-        adjustedInfo: req.adjustedNote || null,
-      }).setImage(req.printUrl);
+      if (isGrouped) {
+        for (const o of FARME_OPTIONS) {
+          const qtd = Number(groupedQuantities[o.value] || 0);
+          if (qtd <= 0) continue;
+
+          await addDailyTotals(interaction.guild.id, req.userId, o.value, qtd);
+          await addWeeklyTotals(interaction.guild.id, req.userId, o.value, qtd);
+          await addDailyRouteCount(interaction.guild.id, req.userId, o.value, 1);
+        }
+      } else {
+        await addDailyTotals(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
+        await addWeeklyTotals(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
+        await addDailyRouteCount(interaction.guild.id, req.userId, req.itemValue, 1);
+      }
+
+      const embed = isGrouped
+        ? makeGroupedRequestEmbed({
+            userTag: req.userTag,
+            userId: req.userId,
+            quantities: groupedQuantities,
+            status: "🟢 Aprovado",
+            approverTag: interaction.user.tag,
+            adjustedInfo: req.adjustedNote || null,
+          }).setImage(req.printUrl)
+        : makeRequestEmbed({
+            userTag: req.userTag,
+            userId: req.userId,
+            itemLabel: req.itemLabel,
+            quantidade: req.quantidade,
+            status: "🟢 Aprovado",
+            approverTag: interaction.user.tag,
+            adjustedInfo: req.adjustedNote || null,
+          }).setImage(req.printUrl);
 
       await interaction.message
         .edit({
@@ -1728,12 +1814,16 @@ client.on("interactionCreate", async (interaction) => {
 
       await safeNotifyDM(
         req.userId,
-        `✅ Seu farme foi **APROVADO**.\nItem: **${req.itemLabel}**\nQuantidade: **${req.quantidade}**\nAprovado por: **${interaction.user.tag}**`
+        isGrouped
+          ? `✅ Seu farme foi **APROVADO**.\nItens: **${formatGroupedItemsInline(groupedQuantities)}**\nAprovado por: **${interaction.user.tag}**`
+          : `✅ Seu farme foi **APROVADO**.\nItem: **${req.itemLabel}**\nQuantidade: **${req.quantidade}**\nAprovado por: **${interaction.user.tag}**`
       );
 
       await sendLog(
         interaction.guild,
-        `🟢 Aprovado | Membro: <@${req.userId}> | Por: <@${interaction.user.id}>\nItem: **${req.itemLabel}** | Quantidade: **${req.quantidade}** | Rota do dia +1`,
+        isGrouped
+          ? `🟢 Aprovado | Membro: <@${req.userId}> | Por: <@${interaction.user.id}>\nItens: **${formatGroupedItemsInline(groupedQuantities)}**`
+          : `🟢 Aprovado | Membro: <@${req.userId}> | Por: <@${interaction.user.id}>\nItem: **${req.itemLabel}** | Quantidade: **${req.quantidade}** | Rota do dia +1`,
         embed
       );
 
@@ -1741,29 +1831,30 @@ client.on("interactionCreate", async (interaction) => {
 
       return interaction.editReply({
         content: "✅ Aprovado. Painel staff:",
-        components: [staffPanelButtons(requestId, is00(member, cfg))],
+        components: [staffPanelButtons(requestId, is00(member, cfg), isGrouped)],
       });
     }
 
     // BOTÃO NEGAR
     if (interaction.isButton() && interaction.customId === "farme_public_negar") {
       if (!isStaff(member, cfg)) {
-        return interaction.reply({ content: "❌ Apenas **00** ou **Gerente** pode aprovar/negar.", ephemeral: true });
+        return interaction.reply({ content: "❌ Apenas **00** ou **Gerente** pode aprovar/negar.", flags: MessageFlags.Ephemeral });
       }
 
       const requestId = interaction.message.id;
       const req = await getRequestByRequestId(interaction.guild.id, requestId);
-      if (!req) return interaction.reply({ content: "❌ Pedido não encontrado.", ephemeral: true });
+      if (!req) return interaction.reply({ content: "❌ Pedido não encontrado.", flags: MessageFlags.Ephemeral });
 
       if (req.userId === interaction.user.id) {
-        return interaction.reply({ content: "❌ Você não pode **negar seu próprio farme**.", ephemeral: true });
+        return interaction.reply({ content: "❌ Você não pode **negar seu próprio farme**.", flags: MessageFlags.Ephemeral });
       }
 
       if (req.status !== "pending") {
+        const isGrouped = hasGroupedQuantities(req.quantities || {});
         return interaction.reply({
           content: "⚠️ Esse pedido já foi avaliado.",
-          components: [staffPanelButtons(requestId, is00(member, cfg))],
-          ephemeral: true,
+          components: [staffPanelButtons(requestId, is00(member, cfg), isGrouped)],
+          flags: MessageFlags.Ephemeral,
         });
       }
 
@@ -1782,7 +1873,7 @@ client.on("interactionCreate", async (interaction) => {
 
     // MODAL NEGAR
     if (interaction.isModalSubmit() && interaction.customId.startsWith("farme_modal_negar:")) {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       if (!isStaff(member, cfg)) {
         return interaction.editReply("❌ Apenas **00** ou **Gerente** pode negar.");
@@ -1797,9 +1888,10 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       if (req.status !== "pending") {
+        const isGroupedAgain = hasGroupedQuantities(req.quantities || {});
         return interaction.editReply({
           content: "⚠️ Esse pedido já foi avaliado.",
-          components: [staffPanelButtons(requestId, is00(member, cfg))],
+          components: [staffPanelButtons(requestId, is00(member, cfg), isGroupedAgain)],
         });
       }
 
@@ -1817,16 +1909,29 @@ client.on("interactionCreate", async (interaction) => {
         [interaction.user.id, interaction.user.tag, reason, interaction.guild.id, requestId]
       );
 
-      const embed = makeRequestEmbed({
-        userTag: req.userTag,
-        userId: req.userId,
-        itemLabel: req.itemLabel,
-        quantidade: req.quantidade,
-        status: "🔴 Negado",
-        approverTag: interaction.user.tag,
-        reason,
-        adjustedInfo: req.adjustedNote || null,
-      }).setImage(req.printUrl);
+      const groupedQuantities = normalizeDraftQuantities(req.quantities || {});
+      const isGrouped = hasGroupedQuantities(groupedQuantities);
+
+      const embed = isGrouped
+        ? makeGroupedRequestEmbed({
+            userTag: req.userTag,
+            userId: req.userId,
+            quantities: groupedQuantities,
+            status: "🔴 Negado",
+            approverTag: interaction.user.tag,
+            reason,
+            adjustedInfo: req.adjustedNote || null,
+          }).setImage(req.printUrl)
+        : makeRequestEmbed({
+            userTag: req.userTag,
+            userId: req.userId,
+            itemLabel: req.itemLabel,
+            quantidade: req.quantidade,
+            status: "🔴 Negado",
+            approverTag: interaction.user.tag,
+            reason,
+            adjustedInfo: req.adjustedNote || null,
+          }).setImage(req.printUrl);
 
       const channel = await interaction.guild.channels.fetch(req.channelId).catch(() => null);
       if (channel && channel.isTextBased()) {
@@ -1844,18 +1949,22 @@ client.on("interactionCreate", async (interaction) => {
 
       await safeNotifyDM(
         req.userId,
-        `❌ Seu farme foi **NEGADO**.\nItem: **${req.itemLabel}**\nQuantidade: **${req.quantidade}**\nNegado por: **${interaction.user.tag}**\nMotivo: **${reason}**`
+        isGrouped
+          ? `❌ Seu farme foi **NEGADO**.\nItens: **${formatGroupedItemsInline(groupedQuantities)}**\nNegado por: **${interaction.user.tag}**\nMotivo: **${reason}**`
+          : `❌ Seu farme foi **NEGADO**.\nItem: **${req.itemLabel}**\nQuantidade: **${req.quantidade}**\nNegado por: **${interaction.user.tag}**\nMotivo: **${reason}**`
       );
 
       await sendLog(
         interaction.guild,
-        `🔴 Negado | Membro: <@${req.userId}> | Por: <@${interaction.user.id}>\nItem: **${req.itemLabel}** | Quantidade: **${req.quantidade}**\nMotivo: **${reason}**`,
+        isGrouped
+          ? `🔴 Negado | Membro: <@${req.userId}> | Por: <@${interaction.user.id}>\nItens: **${formatGroupedItemsInline(groupedQuantities)}**\nMotivo: **${reason}**`
+          : `🔴 Negado | Membro: <@${req.userId}> | Por: <@${interaction.user.id}>\nItem: **${req.itemLabel}** | Quantidade: **${req.quantidade}**\nMotivo: **${reason}**`,
         embed
       );
 
       return interaction.editReply({
         content: "✅ Negado com motivo. Painel staff:",
-        components: [staffPanelButtons(requestId, is00(member, cfg))],
+        components: [staffPanelButtons(requestId, is00(member, cfg), isGrouped)],
       });
     }
 
@@ -1864,15 +1973,26 @@ client.on("interactionCreate", async (interaction) => {
       const [action, requestId] = interaction.customId.split(":");
       const req = await getRequestByRequestId(interaction.guild.id, requestId);
 
-      if (!req) return interaction.reply({ content: "❌ Pedido não encontrado.", ephemeral: true });
-      if (!isStaff(member, cfg)) return interaction.reply({ content: "❌ Apenas staff.", ephemeral: true });
+      if (!req) return interaction.reply({ content: "❌ Pedido não encontrado.", flags: MessageFlags.Ephemeral });
+      if (!isStaff(member, cfg)) return interaction.reply({ content: "❌ Apenas staff.", flags: MessageFlags.Ephemeral });
+
+      const groupedQuantities = normalizeDraftQuantities(req.quantities || {});
+      const isGrouped = hasGroupedQuantities(groupedQuantities);
 
       if (action === "farme_staff_ajustar") {
         if (!is00(member, cfg)) {
-          return interaction.reply({ content: "❌ Apenas o **00** pode ajustar valores.", ephemeral: true });
+          return interaction.reply({ content: "❌ Apenas o **00** pode ajustar valores.", flags: MessageFlags.Ephemeral });
         }
+
+        if (isGrouped) {
+          return interaction.reply({
+            content: "❌ Ajuste manual do 00 ainda está desativado para solicitação agrupada.",
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
         if (req.status === "pending") {
-          return interaction.reply({ content: "❌ Ajuste só depois de aprovar/negar.", ephemeral: true });
+          return interaction.reply({ content: "❌ Ajuste só depois de aprovar/negar.", flags: MessageFlags.Ephemeral });
         }
 
         const modal = new ModalBuilder().setCustomId(`farme_modal_ajustar:${requestId}`).setTitle("Ajustar Farme (00)");
@@ -1907,7 +2027,7 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.showModal(modal);
       }
 
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       if (action === "farme_staff_fechar") {
         if (req.status === "pending") return interaction.editReply("❌ Você precisa aprovar/negar antes de fechar.");
@@ -1963,9 +2083,9 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.editReply("⚠️ Ação desconhecida.");
     }
 
-    // MODAL AJUSTAR FARME (00)
+    // MODAL AJUSTAR FARME (00) - só pedido simples
     if (interaction.isModalSubmit() && interaction.customId.startsWith("farme_modal_ajustar:")) {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       if (!is00(member, cfg)) {
         return interaction.editReply("❌ Apenas o **00** pode ajustar.");
@@ -1974,6 +2094,12 @@ client.on("interactionCreate", async (interaction) => {
       const requestId = interaction.customId.split(":")[1];
       const req = await getRequestByRequestId(interaction.guild.id, requestId);
       if (!req) return interaction.editReply("❌ Pedido não encontrado.");
+
+      const groupedQuantities = normalizeDraftQuantities(req.quantities || {});
+      const isGrouped = hasGroupedQuantities(groupedQuantities);
+      if (isGrouped) {
+        return interaction.editReply("❌ Ajuste manual do 00 ainda está desativado para solicitação agrupada.");
+      }
 
       const op = (interaction.fields.getTextInputValue("op") || "").trim().toLowerCase();
       const valStr = (interaction.fields.getTextInputValue("val") || "").trim();
@@ -2060,9 +2186,9 @@ client.on("interactionCreate", async (interaction) => {
     console.error("interactionCreate ERROR:", err);
     if (interaction.isRepliable()) {
       if (interaction.deferred || interaction.replied) {
-        await interaction.followUp({ content: "❌ Deu erro. Olha o console do Render.", ephemeral: true }).catch(() => null);
+        await interaction.followUp({ content: "❌ Deu erro. Olha o console do Render.", flags: MessageFlags.Ephemeral }).catch(() => null);
       } else {
-        await interaction.reply({ content: "❌ Deu erro. Olha o console do Render.", ephemeral: true }).catch(() => null);
+        await interaction.reply({ content: "❌ Deu erro. Olha o console do Render.", flags: MessageFlags.Ephemeral }).catch(() => null);
       }
     }
   }
