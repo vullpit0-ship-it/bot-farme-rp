@@ -848,7 +848,7 @@ async function registerCommands() {
 // ======================================================
 // READY
 // ======================================================
-client.once("ready", async () => {
+client.once("clientReady", async () => {
   console.log(`✅ BOT REALMENTE ONLINE: ${client.user.tag}`);
 
   await cleanupDB().catch(() => null);
@@ -903,8 +903,11 @@ client.on("interactionCreate", async (interaction) => {
     // /ajuda
     // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "ajuda") {
-      const embed = getHelpEmbedFor(interaction.member, cfg);
-      return interaction.reply({ embeds: [embed], ephemeral: true });
+  await interaction.deferReply({ ephemeral: true });
+
+  const embed = getHelpEmbedFor(interaction.member, cfg);
+  return interaction.editReply({ embeds: [embed] });
+}
     }
 
     // ==================================================
@@ -965,9 +968,22 @@ client.on("interactionCreate", async (interaction) => {
     // /farme
     // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "farme") {
-      if (!cfg.FARME_CATEGORY_ID) {
-        return interaction.reply({ content: "❌ FARME_CATEGORY_ID não configurado neste servidor.", ephemeral: true });
-      }
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!cfg.FARME_CATEGORY_ID) {
+    return interaction.editReply({ content: "❌ FARME_CATEGORY_ID não configurado neste servidor." });
+  }
+
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId("farme_menu")
+    .setPlaceholder("Escolha uma opção…")
+    .addOptions(FARME_OPTIONS);
+
+  return interaction.editReply({
+    content: "Selecione a opção para criar/abrir seu canal privado:",
+    components: [new ActionRowBuilder().addComponents(menu)],
+  });
+}
 
       const menu = new StringSelectMenuBuilder()
         .setCustomId("farme_menu")
@@ -985,21 +1001,22 @@ client.on("interactionCreate", async (interaction) => {
     // /gerenciarcanal
     // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "gerenciarcanal") {
-      if (!isStaff(interaction.member, cfg)) {
-        return interaction.reply({ content: "❌ Apenas 00/Gerente.", ephemeral: true });
-      }
+  await interaction.deferReply({ ephemeral: true });
 
-      const latest = await getLatestRequestByChannel(interaction.guild.id, interaction.channelId);
-      if (!latest) {
-        return interaction.reply({ content: "❌ Não encontrei nenhum pedido salvo para este canal.", ephemeral: true });
-      }
+  if (!isStaff(interaction.member, cfg)) {
+    return interaction.editReply({ content: "❌ Apenas 00/Gerente." });
+  }
 
-      return interaction.reply({
-        content: `🛠️ Painel do canal atual (Pedido: ${latest.status})`,
-        components: [staffPanelButtons(latest.requestId, is00(interaction.member, cfg))],
-        ephemeral: true,
-      });
-    }
+  const latest = await getLatestRequestByChannel(interaction.guild.id, interaction.channelId);
+  if (!latest) {
+    return interaction.editReply({ content: "❌ Não encontrei nenhum pedido salvo para este canal." });
+  }
+
+  return interaction.editReply({
+    content: `🛠️ Painel do canal atual (Pedido: ${latest.status})`,
+    components: [staffPanelButtons(latest.requestId, is00(interaction.member, cfg))],
+  });
+}
 
     // ==================================================
     // MENU /farme
@@ -1088,97 +1105,107 @@ client.on("interactionCreate", async (interaction) => {
     // /enviarfarme
     // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "enviarfarme") {
-      const opt = parseItemFromChannelName(interaction.channel?.name);
-      if (!opt) {
-        return interaction.reply({
-          content: "❌ Use este comando dentro do seu canal de farme (farme-...-seunome).",
-          ephemeral: true,
-        });
-      }
+  await interaction.deferReply({ ephemeral: true });
 
-      const remaining = await getCooldownRemaining(interaction.guild.id, interaction.user.id);
-      if (remaining > 0) {
-        return interaction.reply({ content: `⏳ Aguarde **${remaining}s** para enviar outro farme.`, ephemeral: true });
-      }
+  const opt = parseItemFromChannelName(interaction.channel?.name);
+  if (!opt) {
+    return interaction.editReply({
+      content: "❌ Use este comando dentro do seu canal de farme (farme-...-seunome).",
+    });
+  }
 
-      const quantidade = interaction.options.getInteger("quantidade", true);
-      const print = interaction.options.getAttachment("print", true);
+  const remaining = await getCooldownRemaining(interaction.guild.id, interaction.user.id);
+  if (remaining > 0) {
+    return interaction.editReply({ content: `⏳ Aguarde **${remaining}s** para enviar outro farme.` });
+  }
 
-      if (!print.contentType?.startsWith("image/")) {
-        return interaction.reply({ content: "❌ O anexo precisa ser uma **imagem/print**.", ephemeral: true });
-      }
+  const quantidade = interaction.options.getInteger("quantidade", true);
+  const print = interaction.options.getAttachment("print", true);
 
-      await setCooldown(interaction.guild.id, interaction.user.id);
+  if (!print.contentType?.startsWith("image/")) {
+    return interaction.editReply({ content: "❌ O anexo precisa ser uma **imagem/print**." });
+  }
 
-      const embed = makeRequestEmbed({
-        userTag: interaction.user.tag,
-        userId: interaction.user.id,
-        itemLabel: opt.label,
-        quantidade,
-        status: "🟡 Pendente",
-      }).setImage(print.url);
+  await setCooldown(interaction.guild.id, interaction.user.id);
 
-      const msg = await interaction.channel.send({
-        content: `📣 Solicitação enviada por ${interaction.user}. (Aguardando **00/Gerente**)`,
-        embeds: [embed],
-        components: [publicButtons({ disabled: false })],
-      });
+  const embed = makeRequestEmbed({
+    userTag: interaction.user.tag,
+    userId: interaction.user.id,
+    itemLabel: opt.label,
+    quantidade,
+    status: "🟡 Pendente",
+  }).setImage(print.url);
 
-      const requestId = msg.id;
+  const msg = await interaction.channel.send({
+    content: `📣 Solicitação enviada por ${interaction.user}. (Aguardando **00/Gerente**)`,
+    embeds: [embed],
+    components: [publicButtons({ disabled: false })],
+  });
 
-      await pool.query(
-        `INSERT INTO farme_requests
-        ("guildId","requestId","messageId","channelId","userId","userTag","itemValue","itemLabel",quantidade,"originalQuantidade","printUrl",status)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending')`,
-        [
-          interaction.guild.id,
-          requestId,
-          msg.id,
-          interaction.channel.id,
-          interaction.user.id,
-          interaction.user.tag,
-          opt.value,
-          opt.label,
-          quantidade,
-          quantidade,
-          print.url,
-        ]
-      );
+  const requestId = msg.id;
 
-      return interaction.reply({ content: "✅ Enviado! Aguarde aprovação do 00/Gerente.", ephemeral: true });
-    }
+  await pool.query(
+    `INSERT INTO farme_requests
+    ("guildId","requestId","messageId","channelId","userId","userTag","itemValue","itemLabel",quantidade,"originalQuantidade","printUrl",status)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending')`,
+    [
+      interaction.guild.id,
+      requestId,
+      msg.id,
+      interaction.channel.id,
+      interaction.user.id,
+      interaction.user.tag,
+      opt.value,
+      opt.label,
+      quantidade,
+      quantidade,
+      print.url,
+    ]
+  );
+
+  return interaction.editReply({ content: "✅ Enviado! Aguarde aprovação do 00/Gerente." });
+}
 
     // ==================================================
     // /meusfarmes
     // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "meusfarmes") {
-      const totals = await getUserTotals(interaction.guild.id, interaction.user.id);
-      const lines = FARME_OPTIONS.map((o) => `• **${o.label}**: ${totals.items[o.value] || 0}`).join("\n");
+  await interaction.deferReply({ ephemeral: true });
 
-      const embed = new EmbedBuilder()
-        .setTitle("📊 Sua Tabela de Farmes")
-        .setDescription(lines)
-        .addFields({ name: "🏁 Total", value: String(totals.total), inline: false })
-        .setTimestamp(new Date());
+  const totals = await getUserTotals(interaction.guild.id, interaction.user.id);
 
-      return interaction.reply({ embeds: [embed], ephemeral: true });
+  const lines = FARME_OPTIONS.map((o) => `• **${o.label}**: ${totals.items[o.value] || 0}`).join("\n");
+
+  const embed = new EmbedBuilder()
+    .setTitle("📊 Sua Tabela de Farmes")
+    .setDescription(lines)
+    .addFields({ name: "🏁 Total", value: String(totals.total), inline: false })
+    .setTimestamp(new Date());
+
+  return interaction.editReply({ embeds: [embed] });
+}
     }
 
     // ==================================================
     // /ranking
     // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "ranking") {
-      const entries = await getRanking(interaction.guild.id, 10);
+  await interaction.deferReply({ ephemeral: true });
 
-      if (!entries.length) {
-        return interaction.reply({ content: "Ainda não tem farmes aprovados no ranking.", ephemeral: true });
-      }
+  const entries = await getRanking(interaction.guild.id, 10);
 
-      const desc = entries.map((e, i) => `**${i + 1}.** <@${e.userId}> — **${e.total}**`).join("\n");
-      const embed = new EmbedBuilder().setTitle("🏆 Ranking de Farmes (Top 10)").setDescription(desc).setTimestamp(new Date());
+  if (!entries.length) {
+    return interaction.editReply({ content: "Ainda não tem farmes aprovados no ranking." });
+  }
 
-      return interaction.reply({ embeds: [embed], ephemeral: true });
-    }
+  const desc = entries.map((e, i) => `**${i + 1}.** <@${e.userId}> — **${e.total}**`).join("\n");
+  const embed = new EmbedBuilder()
+    .setTitle("🏆 Ranking de Farmes (Top 10)")
+    .setDescription(desc)
+    .setTimestamp(new Date());
+
+  return interaction.editReply({ embeds: [embed] });
+}
 
     // ==================================================
     // BOTÃO APROVAR
