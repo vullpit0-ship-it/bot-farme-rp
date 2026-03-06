@@ -100,7 +100,7 @@ const CONFIGS = {
     CLOSED_CATEGORY_ID: "",
 
     DAILY_DM_WHITELIST: [
-      "1477868954658541620", // se isso aqui era role por engano, troque por userId real
+      // coloque userIds reais aqui se quiser DM diária
     ],
   },
 
@@ -449,14 +449,6 @@ async function upsertChannelMap(guildId, userId, itemValue, channelId) {
   );
 }
 
-async function getMappedChannelId(guildId, userId, itemValue) {
-  const { rows } = await pool.query(
-    `SELECT "channelId" FROM farme_channels WHERE "guildId"=$1 AND "userId"=$2 AND "itemValue"=$3 LIMIT 1`,
-    [guildId, userId, itemValue]
-  );
-  return rows[0]?.channelId || null;
-}
-
 async function setCooldown(guildId, userId) {
   await pool.query(
     `INSERT INTO farme_cooldowns ("guildId","userId","lastAt")
@@ -700,7 +692,7 @@ async function updateLeaderboardFixed(guild) {
 }
 
 // ======================================================
-// 📊 PRODUTIVIDADE FIXA (1 msg por membro)
+// 📊 PRODUTIVIDADE FIXA
 // ======================================================
 function buildProductivityEmbedFor(guild, userId, totals) {
   const items = FARME_OPTIONS
@@ -793,7 +785,6 @@ async function runDailyAuditAndReport() {
 // ======================================================
 const commands = [
   new SlashCommandBuilder().setName("farme").setDescription("Abra o menu e crie seu canal privado de farme."),
-
   new SlashCommandBuilder()
     .setName("enviarfarme")
     .setDescription("Enviar seu farme (quantidade + print) para aprovação.")
@@ -803,13 +794,9 @@ const commands = [
     .addAttachmentOption((opt) =>
       opt.setName("print").setDescription("Envie o print/anexo como prova").setRequired(true)
     ),
-
   new SlashCommandBuilder().setName("meusfarmes").setDescription("Mostra seus totais aprovados por item."),
-
   new SlashCommandBuilder().setName("ranking").setDescription("Mostra o ranking geral de farmes (top 10)."),
-
   new SlashCommandBuilder().setName("gerenciarcanal").setDescription("(Staff) Abre painel para Fechar/Encerrar/Ajustar o canal atual."),
-
   new SlashCommandBuilder()
     .setName("testardiario")
     .setDescription("(Staff) Posta no canal staff a tabela por cargos.")
@@ -827,7 +814,6 @@ const commands = [
     .addStringOption((opt) =>
       opt.setName("data").setDescription('Se "dia" = data, coloque aqui: YYYY-MM-DD').setRequired(false)
     ),
-
   new SlashCommandBuilder().setName("ajuda").setDescription("Mostra os comandos disponíveis para o seu cargo."),
 ].map((c) => c.toJSON());
 
@@ -883,6 +869,15 @@ client.once("clientReady", async () => {
 // INTERACTIONS
 // ======================================================
 client.on("interactionCreate", async (interaction) => {
+  console.log("[INTERACTION]", {
+    type: interaction.type,
+    commandName: interaction.isChatInputCommand() ? interaction.commandName : null,
+    customId: interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit() ? interaction.customId : null,
+    guildId: interaction.guild?.id || null,
+    channelId: interaction.channelId || null,
+    userId: interaction.user?.id || null,
+  });
+
   try {
     if (!interaction.guild) {
       if (interaction.isRepliable()) {
@@ -903,11 +898,9 @@ client.on("interactionCreate", async (interaction) => {
     // /ajuda
     // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "ajuda") {
-  await interaction.deferReply({ ephemeral: true });
-
-  const embed = getHelpEmbedFor(interaction.member, cfg);
-  return interaction.editReply({ embeds: [embed] });
-}
+      await interaction.deferReply({ ephemeral: true });
+      const embed = getHelpEmbedFor(interaction.member, cfg);
+      return interaction.editReply({ embeds: [embed] });
     }
 
     // ==================================================
@@ -930,11 +923,10 @@ client.on("interactionCreate", async (interaction) => {
 
       const targets = interaction.guild.members.cache
         .filter((m) => isTrackedMember(m, cfg))
-        .map((m) => m)
         .sort((a, b) => (a.displayName || a.user.username).localeCompare(b.displayName || b.user.username));
 
       const rows = [];
-      for (const m of targets) {
+      for (const m of targets.values()) {
         rows.push(await buildStaffRow(interaction.guild.id, m.user.id, m.displayName || m.user.username, dk));
       }
 
@@ -947,7 +939,7 @@ client.on("interactionCreate", async (interaction) => {
       const header =
         `📌 **Tabela de metas** solicitada por <@${interaction.user.id}> — Data: **${dk}**\n` +
         `Cargos: ${trackedRolesTxt || "não configurados"}\n` +
-        `Total encontrados: **${targets.length}**\n` +
+        `Total encontrados: **${targets.size}**\n` +
         `Legenda: **Rotas no dia** = quantidade aprovada no dia | **Rota completa** = dias seguidos faltando (0 se fez no dia).`;
 
       const pages = splitIntoPages(rows.length ? rows : ["⚠️ Ninguém encontrado nesses cargos."], 3500);
@@ -961,39 +953,27 @@ client.on("interactionCreate", async (interaction) => {
       const ok = await sendStaffTable(interaction.guild, header, embeds);
       if (!ok) return interaction.editReply("❌ STAFF_TABLE_CHANNEL_ID não configurado nesse servidor.");
 
-      return interaction.editReply(`✅ Postei a tabela no canal staff.`);
+      return interaction.editReply("✅ Postei a tabela no canal staff.");
     }
 
     // ==================================================
     // /farme
     // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "farme") {
-  await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
 
-  if (!cfg.FARME_CATEGORY_ID) {
-    return interaction.editReply({ content: "❌ FARME_CATEGORY_ID não configurado neste servidor." });
-  }
-
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId("farme_menu")
-    .setPlaceholder("Escolha uma opção…")
-    .addOptions(FARME_OPTIONS);
-
-  return interaction.editReply({
-    content: "Selecione a opção para criar/abrir seu canal privado:",
-    components: [new ActionRowBuilder().addComponents(menu)],
-  });
-}
+      if (!cfg.FARME_CATEGORY_ID) {
+        return interaction.editReply({ content: "❌ FARME_CATEGORY_ID não configurado neste servidor." });
+      }
 
       const menu = new StringSelectMenuBuilder()
         .setCustomId("farme_menu")
         .setPlaceholder("Escolha uma opção…")
         .addOptions(FARME_OPTIONS);
 
-      return interaction.reply({
+      return interaction.editReply({
         content: "Selecione a opção para criar/abrir seu canal privado:",
         components: [new ActionRowBuilder().addComponents(menu)],
-        ephemeral: true,
       });
     }
 
@@ -1001,22 +981,125 @@ client.on("interactionCreate", async (interaction) => {
     // /gerenciarcanal
     // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "gerenciarcanal") {
-  await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
 
-  if (!isStaff(interaction.member, cfg)) {
-    return interaction.editReply({ content: "❌ Apenas 00/Gerente." });
-  }
+      if (!isStaff(interaction.member, cfg)) {
+        return interaction.editReply({ content: "❌ Apenas 00/Gerente." });
+      }
 
-  const latest = await getLatestRequestByChannel(interaction.guild.id, interaction.channelId);
-  if (!latest) {
-    return interaction.editReply({ content: "❌ Não encontrei nenhum pedido salvo para este canal." });
-  }
+      const latest = await getLatestRequestByChannel(interaction.guild.id, interaction.channelId);
+      if (!latest) {
+        return interaction.editReply({ content: "❌ Não encontrei nenhum pedido salvo para este canal." });
+      }
 
-  return interaction.editReply({
-    content: `🛠️ Painel do canal atual (Pedido: ${latest.status})`,
-    components: [staffPanelButtons(latest.requestId, is00(interaction.member, cfg))],
-  });
-}
+      return interaction.editReply({
+        content: `🛠️ Painel do canal atual (Pedido: ${latest.status})`,
+        components: [staffPanelButtons(latest.requestId, is00(interaction.member, cfg))],
+      });
+    }
+
+    // ==================================================
+    // /enviarfarme
+    // ==================================================
+    if (interaction.isChatInputCommand() && interaction.commandName === "enviarfarme") {
+      await interaction.deferReply({ ephemeral: true });
+
+      const opt = parseItemFromChannelName(interaction.channel?.name);
+      if (!opt) {
+        return interaction.editReply({
+          content: "❌ Use este comando dentro do seu canal de farme (farme-...-seunome).",
+        });
+      }
+
+      const remaining = await getCooldownRemaining(interaction.guild.id, interaction.user.id);
+      if (remaining > 0) {
+        return interaction.editReply({ content: `⏳ Aguarde **${remaining}s** para enviar outro farme.` });
+      }
+
+      const quantidade = interaction.options.getInteger("quantidade", true);
+      const print = interaction.options.getAttachment("print", true);
+
+      if (!print.contentType?.startsWith("image/")) {
+        return interaction.editReply({ content: "❌ O anexo precisa ser uma **imagem/print**." });
+      }
+
+      await setCooldown(interaction.guild.id, interaction.user.id);
+
+      const embed = makeRequestEmbed({
+        userTag: interaction.user.tag,
+        userId: interaction.user.id,
+        itemLabel: opt.label,
+        quantidade,
+        status: "🟡 Pendente",
+      }).setImage(print.url);
+
+      const msg = await interaction.channel.send({
+        content: `📣 Solicitação enviada por ${interaction.user}. (Aguardando **00/Gerente**)`,
+        embeds: [embed],
+        components: [publicButtons({ disabled: false })],
+      });
+
+      const requestId = msg.id;
+
+      await pool.query(
+        `INSERT INTO farme_requests
+        ("guildId","requestId","messageId","channelId","userId","userTag","itemValue","itemLabel",quantidade,"originalQuantidade","printUrl",status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending')`,
+        [
+          interaction.guild.id,
+          requestId,
+          msg.id,
+          interaction.channel.id,
+          interaction.user.id,
+          interaction.user.tag,
+          opt.value,
+          opt.label,
+          quantidade,
+          quantidade,
+          print.url,
+        ]
+      );
+
+      return interaction.editReply({ content: "✅ Enviado! Aguarde aprovação do 00/Gerente." });
+    }
+
+    // ==================================================
+    // /meusfarmes
+    // ==================================================
+    if (interaction.isChatInputCommand() && interaction.commandName === "meusfarmes") {
+      await interaction.deferReply({ ephemeral: true });
+
+      const totals = await getUserTotals(interaction.guild.id, interaction.user.id);
+      const lines = FARME_OPTIONS.map((o) => `• **${o.label}**: ${totals.items[o.value] || 0}`).join("\n");
+
+      const embed = new EmbedBuilder()
+        .setTitle("📊 Sua Tabela de Farmes")
+        .setDescription(lines)
+        .addFields({ name: "🏁 Total", value: String(totals.total), inline: false })
+        .setTimestamp(new Date());
+
+      return interaction.editReply({ embeds: [embed] });
+    }
+
+    // ==================================================
+    // /ranking
+    // ==================================================
+    if (interaction.isChatInputCommand() && interaction.commandName === "ranking") {
+      await interaction.deferReply({ ephemeral: true });
+
+      const entries = await getRanking(interaction.guild.id, 10);
+      if (!entries.length) {
+        return interaction.editReply({ content: "Ainda não tem farmes aprovados no ranking." });
+      }
+
+      const desc = entries.map((e, i) => `**${i + 1}.** <@${e.userId}> — **${e.total}**`).join("\n");
+      const embed = new EmbedBuilder()
+        .setTitle("🏆 Ranking de Farmes (Top 10)")
+        .setDescription(desc)
+        .setTimestamp(new Date());
+
+      return interaction.editReply({ embeds: [embed] });
+    }
 
     // ==================================================
     // MENU /farme
@@ -1024,6 +1107,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isStringSelectMenu() && interaction.customId === "farme_menu") {
       const selected = interaction.values[0];
       const opt = FARME_OPTIONS.find((o) => o.value === selected);
+
       if (!opt) {
         return interaction.reply({ content: "❌ Item inválido.", ephemeral: true });
       }
@@ -1095,117 +1179,11 @@ client.on("interactionCreate", async (interaction) => {
         .setURL(channelLink(interaction.guild.id, targetChannel.id));
 
       return interaction.reply({
-        content: `✅ Canal pronto.`,
+        content: "✅ Canal pronto.",
         components: [new ActionRowBuilder().addComponents(goBtn)],
         ephemeral: true,
       });
     }
-
-    // ==================================================
-    // /enviarfarme
-    // ==================================================
-    if (interaction.isChatInputCommand() && interaction.commandName === "enviarfarme") {
-  await interaction.deferReply({ ephemeral: true });
-
-  const opt = parseItemFromChannelName(interaction.channel?.name);
-  if (!opt) {
-    return interaction.editReply({
-      content: "❌ Use este comando dentro do seu canal de farme (farme-...-seunome).",
-    });
-  }
-
-  const remaining = await getCooldownRemaining(interaction.guild.id, interaction.user.id);
-  if (remaining > 0) {
-    return interaction.editReply({ content: `⏳ Aguarde **${remaining}s** para enviar outro farme.` });
-  }
-
-  const quantidade = interaction.options.getInteger("quantidade", true);
-  const print = interaction.options.getAttachment("print", true);
-
-  if (!print.contentType?.startsWith("image/")) {
-    return interaction.editReply({ content: "❌ O anexo precisa ser uma **imagem/print**." });
-  }
-
-  await setCooldown(interaction.guild.id, interaction.user.id);
-
-  const embed = makeRequestEmbed({
-    userTag: interaction.user.tag,
-    userId: interaction.user.id,
-    itemLabel: opt.label,
-    quantidade,
-    status: "🟡 Pendente",
-  }).setImage(print.url);
-
-  const msg = await interaction.channel.send({
-    content: `📣 Solicitação enviada por ${interaction.user}. (Aguardando **00/Gerente**)`,
-    embeds: [embed],
-    components: [publicButtons({ disabled: false })],
-  });
-
-  const requestId = msg.id;
-
-  await pool.query(
-    `INSERT INTO farme_requests
-    ("guildId","requestId","messageId","channelId","userId","userTag","itemValue","itemLabel",quantidade,"originalQuantidade","printUrl",status)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending')`,
-    [
-      interaction.guild.id,
-      requestId,
-      msg.id,
-      interaction.channel.id,
-      interaction.user.id,
-      interaction.user.tag,
-      opt.value,
-      opt.label,
-      quantidade,
-      quantidade,
-      print.url,
-    ]
-  );
-
-  return interaction.editReply({ content: "✅ Enviado! Aguarde aprovação do 00/Gerente." });
-}
-
-    // ==================================================
-    // /meusfarmes
-    // ==================================================
-    if (interaction.isChatInputCommand() && interaction.commandName === "meusfarmes") {
-  await interaction.deferReply({ ephemeral: true });
-
-  const totals = await getUserTotals(interaction.guild.id, interaction.user.id);
-
-  const lines = FARME_OPTIONS.map((o) => `• **${o.label}**: ${totals.items[o.value] || 0}`).join("\n");
-
-  const embed = new EmbedBuilder()
-    .setTitle("📊 Sua Tabela de Farmes")
-    .setDescription(lines)
-    .addFields({ name: "🏁 Total", value: String(totals.total), inline: false })
-    .setTimestamp(new Date());
-
-  return interaction.editReply({ embeds: [embed] });
-}
-    }
-
-    // ==================================================
-    // /ranking
-    // ==================================================
-    if (interaction.isChatInputCommand() && interaction.commandName === "ranking") {
-  await interaction.deferReply({ ephemeral: true });
-
-  const entries = await getRanking(interaction.guild.id, 10);
-
-  if (!entries.length) {
-    return interaction.editReply({ content: "Ainda não tem farmes aprovados no ranking." });
-  }
-
-  const desc = entries.map((e, i) => `**${i + 1}.** <@${e.userId}> — **${e.total}**`).join("\n");
-  const embed = new EmbedBuilder()
-    .setTitle("🏆 Ranking de Farmes (Top 10)")
-    .setDescription(desc)
-    .setTimestamp(new Date());
-
-  return interaction.editReply({ embeds: [embed] });
-}
 
     // ==================================================
     // BOTÃO APROVAR
@@ -1324,6 +1302,7 @@ client.on("interactionCreate", async (interaction) => {
       const requestId = interaction.customId.split(":")[1];
       const req = await getRequestByRequestId(interaction.guild.id, requestId);
       if (!req) return interaction.editReply("❌ Pedido não encontrado.");
+
       if (req.status !== "pending") {
         return interaction.editReply({
           content: "⚠️ Esse pedido já foi avaliado.",
@@ -1395,9 +1374,6 @@ client.on("interactionCreate", async (interaction) => {
       if (!req) return interaction.reply({ content: "❌ Pedido não encontrado.", ephemeral: true });
       if (!isStaff(interaction.member, cfg)) return interaction.reply({ content: "❌ Apenas staff.", ephemeral: true });
 
-      // ----------------------
-      // AJUSTAR -> abre modal
-      // ----------------------
       if (action === "farme_staff_ajustar") {
         if (!is00(interaction.member, cfg)) {
           return interaction.reply({ content: "❌ Apenas o **00** pode ajustar valores.", ephemeral: true });
@@ -1442,9 +1418,6 @@ client.on("interactionCreate", async (interaction) => {
 
       await interaction.deferReply({ ephemeral: true });
 
-      // ----------------------
-      // FECHAR CANAL
-      // ----------------------
       if (action === "farme_staff_fechar") {
         if (req.status === "pending") return interaction.editReply("❌ Você precisa aprovar/negar antes de fechar.");
         if (req.status === "closed") return interaction.editReply("⚠️ Já está fechado. Use Encerrar.");
@@ -1472,9 +1445,6 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.editReply("✅ Canal fechado (sumiu pro membro). Agora você pode **Encerrar**.");
       }
 
-      // ----------------------
-      // ENCERRAR CANAL
-      // ----------------------
       if (action === "farme_staff_encerrar") {
         if (req.status !== "closed") return interaction.editReply("❌ Você precisa Fechar antes de Encerrar.");
 
@@ -1549,7 +1519,6 @@ client.on("interactionCreate", async (interaction) => {
         ]
       );
 
-      // se já estava aprovado, ajusta totals
       if (req.status === "approved" || req.status === "closed") {
         await addTotals(interaction.guild.id, req.userId, req.itemValue, delta);
       }
