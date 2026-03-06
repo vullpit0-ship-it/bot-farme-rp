@@ -414,7 +414,8 @@ function getHelpEmbedFor(member, cfg) {
 
   const gerenteCmds = [
     { name: "/gerenciarcanal", desc: "Painel staff para fechar/encerrar o canal atual." },
-    { name: "/testardiario", desc: "Tabela staff por cargos e por data." },
+    { name: "/rotas", desc: "Mostra as rotas de hoje de um membro." },
+    { name: "/faltando", desc: "Mostra há quantos dias o membro está sem cada rota." },
   ];
 
   const extra00Cmds = [
@@ -552,6 +553,36 @@ function buildFarmPanelButtons(quantities) {
   );
 
   return [row1, row2];
+}
+
+async function buildRoutesTodayEmbed(guildId, userId, displayName) {
+  const lines = [];
+
+  for (const o of FARME_OPTIONS) {
+    const done = await getApprovedCount(guildId, dateKeyNow(), userId, o.value);
+    lines.push(`• **${o.label}:** ${done}`);
+  }
+
+  return new EmbedBuilder()
+    .setTitle(`📊 Rotas de Hoje — ${displayName}`)
+    .setDescription(lines.join("\n"))
+    .setTimestamp(new Date());
+}
+
+async function buildMissingRoutesEmbed(guildId, userId, displayName) {
+  const today = dateKeyNow();
+  const lines = [];
+
+  for (const o of FARME_OPTIONS) {
+    const streak = await missStreakUntil(guildId, today, userId, o.value, 30);
+    lines.push(`• **${o.label}:** ${streak === 0 ? 0 : `-${streak}`}`);
+  }
+
+  return new EmbedBuilder()
+    .setTitle(`📌 Rotas Faltando — ${displayName}`)
+    .setDescription(lines.join("\n"))
+    .setFooter({ text: "0 = fez hoje | negativo = dias sem enviar" })
+    .setTimestamp(new Date());
 }
 
 // ======================================================
@@ -861,11 +892,10 @@ async function sendStaffTable(guild, content, embeds = []) {
   if (!cfg?.STAFF_TABLE_CHANNEL_ID) return false;
 
   const ch = await guild.channels.fetch(cfg.STAFF_TABLE_CHANNEL_ID).catch(() => null);
-  if (ch && ch.isTextBased()) {
-    await ch.send({ content, embeds }).catch(() => null);
-    return true;
-  }
-  return false;
+  if (!ch || !ch.isTextBased()) return false;
+
+  const sent = await ch.send({ content, embeds }).catch(() => null);
+  return !!sent;
 }
 
 async function safeDailyDM(userId, text) {
@@ -1158,24 +1188,6 @@ async function updatePanelsAfterChange(guild, userId) {
 // ======================================================
 // 📅 RELATÓRIOS / RESETS
 // ======================================================
-async function buildStaffRow(guildId, userId, displayName, dateKey) {
-  const doneParts = [];
-  const streakParts = [];
-
-  for (const o of FARME_OPTIONS) {
-    const done = await getApprovedCount(guildId, dateKey, userId, o.value);
-    const streak = await missStreakUntil(guildId, dateKey, userId, o.value);
-    doneParts.push(`${o.label}: ${done}`);
-    streakParts.push(`${o.label}: ${streak}`);
-  }
-
-  return (
-    `👤 **${displayName}** (<@${userId}>)\n` +
-    `✅ **Rotas no dia:** ${doneParts.join(" | ")}\n` +
-    `📌 **Rota completa:** ${streakParts.join(" | ")}`
-  );
-}
-
 async function runDailyAuditAndReport() {
   const dk = DateTime.now().setZone(TZ).minus({ days: 1 }).toISODate();
 
@@ -1186,7 +1198,7 @@ async function runDailyAuditAndReport() {
     for (const userId of cfg.DAILY_DM_WHITELIST || []) {
       await safeDailyDM(
         userId,
-        `📅 **Meta diária (${dk})**\n\n📌 Use **/testardiario** para ver a tabela completa no canal staff.`
+        `📅 **Meta diária (${dk})**\n\n📌 Use **/rotas** e **/faltando** para consultar membros individualmente.`
       );
     }
 
@@ -1278,21 +1290,17 @@ const commands = [
     .setDescription("(Staff) Abre painel para Fechar/Encerrar/Ajustar o canal atual."),
 
   new SlashCommandBuilder()
-    .setName("testardiario")
-    .setDescription("(Staff) Posta no canal staff a tabela por cargos.")
-    .addStringOption((opt) =>
-      opt
-        .setName("dia")
-        .setDescription('Escolha: "hoje", "ontem" ou "data"')
-        .setRequired(true)
-        .addChoices(
-          { name: "hoje", value: "hoje" },
-          { name: "ontem", value: "ontem" },
-          { name: "data (YYYY-MM-DD)", value: "data" }
-        )
-    )
-    .addStringOption((opt) =>
-      opt.setName("data").setDescription('Se "dia" = data, coloque aqui: YYYY-MM-DD').setRequired(false)
+    .setName("rotas")
+    .setDescription("(Staff) Mostra as rotas de hoje de um membro.")
+    .addUserOption((opt) =>
+      opt.setName("membro").setDescription("Membro para consultar").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("faltando")
+    .setDescription("(Staff) Mostra há quantos dias o membro está sem cada rota.")
+    .addUserOption((opt) =>
+      opt.setName("membro").setDescription("Membro para consultar").setRequired(true)
     ),
 
   new SlashCommandBuilder()
@@ -1390,55 +1398,58 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.editReply({ embeds: [embed] });
     }
 
-    // /testardiario
-    if (interaction.isChatInputCommand() && interaction.commandName === "testardiario") {
+    // /rotas
+    if (interaction.isChatInputCommand() && interaction.commandName === "rotas") {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       if (!isStaff(member, cfg)) {
         return interaction.editReply({ content: "❌ Apenas 00/Gerente." });
       }
 
-      const dia = interaction.options.getString("dia", true);
-      const dataStr = interaction.options.getString("data", false);
-
-      const dk = resolveDateKeyFromOption({ dia, dataStr });
-      if (!dk) return interaction.editReply('❌ Data inválida. Use: **YYYY-MM-DD**.');
-
-      await interaction.guild.members.fetch().catch(() => null);
-
-      const targets = interaction.guild.members.cache
-        .filter((m) => isTrackedMember(m, cfg))
-        .sort((a, b) => (a.displayName || a.user.username).localeCompare(b.displayName || b.user.username));
-
-      const rows = [];
-      for (const m of targets.values()) {
-        rows.push(await buildStaffRow(interaction.guild.id, m.user.id, m.displayName || m.user.username, dk));
+      const targetUser = interaction.options.getUser("membro", true);
+      if (targetUser.bot) {
+        return interaction.editReply({ content: "❌ Não é possível consultar bot." });
       }
 
-      const trackedRolesTxt = [
-        cfg.ROLE_MEMBRO_ID ? `<@&${cfg.ROLE_MEMBRO_ID}>` : null,
-        cfg.GERENTE_ROLE_ID ? `<@&${cfg.GERENTE_ROLE_ID}>` : null,
-        cfg.ROLE_00_ID ? `<@&${cfg.ROLE_00_ID}>` : null,
-      ].filter(Boolean).join(" | ");
+      const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+      if (!targetMember) {
+        return interaction.editReply({ content: "❌ Membro não encontrado no servidor." });
+      }
 
-      const header =
-        `📌 **Tabela de metas** solicitada por <@${interaction.user.id}> — Data: **${dk}**\n` +
-        `Cargos: ${trackedRolesTxt || "não configurados"}\n` +
-        `Total encontrados: **${targets.size}**\n` +
-        `Legenda: **Rotas no dia** = aprovações do item no dia (pode ficar negativo se o 00 ajustar) | **Rota completa** = dias seguidos faltando (0 se fez no dia).`;
-
-      const pages = splitIntoPages(rows.length ? rows : ["⚠️ Ninguém encontrado nesses cargos."], 3500);
-      const embeds = pages.slice(0, 8).map((txt, idx) =>
-        new EmbedBuilder()
-          .setTitle(`📊 Controle de metas (${dk})${pages.length > 1 ? ` — Parte ${idx + 1}/${pages.length}` : ""}`)
-          .setDescription(txt)
-          .setTimestamp(new Date())
+      const embed = await buildRoutesTodayEmbed(
+        interaction.guild.id,
+        targetUser.id,
+        targetMember.displayName || targetUser.username
       );
 
-      const ok = await sendStaffTable(interaction.guild, header, embeds);
-      if (!ok) return interaction.editReply("❌ STAFF_TABLE_CHANNEL_ID não configurado nesse servidor.");
+      return interaction.editReply({ embeds: [embed] });
+    }
 
-      return interaction.editReply("✅ Postei a tabela no canal staff.");
+    // /faltando
+    if (interaction.isChatInputCommand() && interaction.commandName === "faltando") {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      if (!isStaff(member, cfg)) {
+        return interaction.editReply({ content: "❌ Apenas 00/Gerente." });
+      }
+
+      const targetUser = interaction.options.getUser("membro", true);
+      if (targetUser.bot) {
+        return interaction.editReply({ content: "❌ Não é possível consultar bot." });
+      }
+
+      const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+      if (!targetMember) {
+        return interaction.editReply({ content: "❌ Membro não encontrado no servidor." });
+      }
+
+      const embed = await buildMissingRoutesEmbed(
+        interaction.guild.id,
+        targetUser.id,
+        targetMember.displayName || targetUser.username
+      );
+
+      return interaction.editReply({ embeds: [embed] });
     }
 
     // /ajustarrota
