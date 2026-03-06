@@ -1,10 +1,3 @@
-// ======================================================
-// ✅ BOT COMPLETO / SLASH / SUPABASE / MULTI SERVIDOR
-// ✅ OPÇÃO B = SEM PAPEL/SEMENTES
-// ✅ ITENS: Pasta Base / Estabilizador / Saco Ziplock / Folha Bruta
-// ✅ RENDER + SUPABASE + PAINÉIS FIXOS + STAFF + AJUSTE 00
-// ======================================================
-
 require("dotenv").config();
 
 const express = require("express");
@@ -31,45 +24,34 @@ const {
   TextInputStyle,
 } = require("discord.js");
 
-console.log("🔥 BUILD SLASH + SUPABASE + MULTI GUILD 🔥", new Date().toISOString());
-
 // ======================================================
 // 🌐 WEB SERVER (Render)
 // ======================================================
 const app = express();
 app.get("/", (req, res) => res.send("Bot online ✅"));
-app.listen(process.env.PORT || 3000, "0.0.0.0", () => {
-  console.log(`🌐 Web OK na porta ${process.env.PORT || 3000}`);
-});
+app.listen(process.env.PORT || 3000, "0.0.0.0");
 
 // ======================================================
 // ✅ ENV
 // ======================================================
 if (!process.env.DISCORD_TOKEN) {
-  console.error("❌ Faltando DISCORD_TOKEN");
+  console.error("Faltando DISCORD_TOKEN");
   process.exit(1);
 }
 if (!process.env.CLIENT_ID) {
-  console.error("❌ Faltando CLIENT_ID");
+  console.error("Faltando CLIENT_ID");
   process.exit(1);
 }
 if (!process.env.DATABASE_URL) {
-  console.error("❌ Faltando DATABASE_URL");
+  console.error("Faltando DATABASE_URL");
   process.exit(1);
 }
 
-console.log("ENV CHECK:", {
-  hasToken: !!process.env.DISCORD_TOKEN,
-  hasClientId: !!process.env.CLIENT_ID,
-  hasDb: !!process.env.DATABASE_URL,
-  port: String(process.env.PORT || 3000),
-});
-
-process.on("unhandledRejection", (e) => console.error("🔥 UNHANDLED REJECTION:", e));
-process.on("uncaughtException", (e) => console.error("🔥 UNCAUGHT EXCEPTION:", e));
+process.on("unhandledRejection", (e) => console.error("UNHANDLED REJECTION:", e));
+process.on("uncaughtException", (e) => console.error("UNCAUGHT EXCEPTION:", e));
 
 // ======================================================
-// 🗄️ SUPABASE / POSTGRES
+// 🗄️ POSTGRES / SUPABASE
 // ======================================================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -98,7 +80,6 @@ const CONFIGS = {
     PRODUCTIVITY_CHANNEL_ID: "1479185862196461638",
 
     CLOSED_CATEGORY_ID: "",
-
     DAILY_DM_WHITELIST: [],
   },
 
@@ -149,15 +130,7 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-client.on("warn", (m) => console.warn("⚠️ WARN:", m));
-client.on("error", (e) => console.error("🔥 CLIENT ERROR:", e));
-client.on("shardError", (e) => console.error("🔥 SHARD ERROR:", e));
-client.on("shardDisconnect", (event, shardId) =>
-  console.warn(`⚠️ SHARD ${shardId} DISCONNECT:`, event?.reason || event)
-);
-client.on("shardReconnecting", (shardId) => console.warn(`♻️ SHARD ${shardId} RECONNECTING...`));
-client.on("shardResume", (shardId) => console.log(`✅ SHARD ${shardId} RESUMED.`));
-client.on("invalidated", () => console.error("🔥 CLIENT INVALIDATED"));
+client.on("error", (e) => console.error("CLIENT ERROR:", e));
 
 // ======================================================
 // 🧱 DB INIT
@@ -205,7 +178,17 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_farme_requests_status
     ON farme_requests ("guildId",status);
 
-    CREATE TABLE IF NOT EXISTS farme_totals (
+    CREATE TABLE IF NOT EXISTS farme_daily_checks (
+      id BIGSERIAL PRIMARY KEY,
+      "guildId" TEXT NOT NULL,
+      "dateKey" TEXT NOT NULL,
+      "userId" TEXT NOT NULL,
+      "itemValue" TEXT NOT NULL,
+      total INTEGER NOT NULL DEFAULT 0,
+      UNIQUE ("guildId","dateKey","userId","itemValue")
+    );
+
+    CREATE TABLE IF NOT EXISTS farme_daily_totals (
       id BIGSERIAL PRIMARY KEY,
       "guildId" TEXT NOT NULL,
       "userId" TEXT NOT NULL,
@@ -214,14 +197,13 @@ async function initDB() {
       UNIQUE ("guildId","userId","itemValue")
     );
 
-    CREATE TABLE IF NOT EXISTS farme_daily (
+    CREATE TABLE IF NOT EXISTS farme_weekly_totals (
       id BIGSERIAL PRIMARY KEY,
       "guildId" TEXT NOT NULL,
-      "dateKey" TEXT NOT NULL,
       "userId" TEXT NOT NULL,
       "itemValue" TEXT NOT NULL,
       total INTEGER NOT NULL DEFAULT 0,
-      UNIQUE ("guildId","dateKey","userId","itemValue")
+      UNIQUE ("guildId","userId","itemValue")
     );
 
     CREATE TABLE IF NOT EXISTS farme_channels (
@@ -248,14 +230,7 @@ async function initDB() {
       valor TEXT,
       UNIQUE ("guildId", chave)
     );
-
-    CREATE TABLE IF NOT EXISTS bot_config (
-      chave TEXT PRIMARY KEY,
-      valor TEXT
-    );
   `);
-
-  console.log("✅ DB OK (farme_requests, farme_totals, farme_daily...)");
 }
 
 // ======================================================
@@ -392,8 +367,8 @@ function getHelpEmbedFor(member, cfg) {
   const memberCmds = [
     { name: "/farme", desc: "Abrir menu e criar/abrir canal privado do item." },
     { name: "/enviarfarme", desc: "Enviar farme (quantidade + print) para aprovação." },
-    { name: "/meusfarmes", desc: "Ver seus totais aprovados por item." },
-    { name: "/ranking", desc: "Ver ranking geral do servidor." },
+    { name: "/meusfarmes", desc: "Ver seus totais do dia por item." },
+    { name: "/ranking", desc: "Ver ranking semanal do servidor." },
     { name: "/ajuda", desc: "Ver os comandos disponíveis." },
   ];
 
@@ -476,30 +451,38 @@ async function getCooldownRemaining(guildId, userId) {
   return remaining > 0 ? Math.ceil(remaining) : 0;
 }
 
-async function addTotals(guildId, userId, itemValue, quantidade) {
+async function addPeriodTotal(tableName, guildId, userId, itemValue, quantidade) {
   await pool.query(
-    `INSERT INTO farme_totals ("guildId","userId","itemValue",total)
+    `INSERT INTO ${tableName} ("guildId","userId","itemValue",total)
      VALUES ($1,$2,$3,$4)
      ON CONFLICT ("guildId","userId","itemValue")
-     DO UPDATE SET total = GREATEST(0, farme_totals.total + EXCLUDED.total)`,
+     DO UPDATE SET total = GREATEST(0, ${tableName}.total + EXCLUDED.total)`,
     [guildId, userId, itemValue, quantidade]
   );
+}
+
+async function addDailyTotals(guildId, userId, itemValue, quantidade) {
+  await addPeriodTotal("farme_daily_totals", guildId, userId, itemValue, quantidade);
+}
+
+async function addWeeklyTotals(guildId, userId, itemValue, quantidade) {
+  await addPeriodTotal("farme_weekly_totals", guildId, userId, itemValue, quantidade);
 }
 
 async function markApprovedToday(guildId, userId, itemValue, quantidade) {
   const dk = dateKeyNow();
   await pool.query(
-    `INSERT INTO farme_daily ("guildId","dateKey","userId","itemValue",total)
+    `INSERT INTO farme_daily_checks ("guildId","dateKey","userId","itemValue",total)
      VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT ("guildId","dateKey","userId","itemValue")
-     DO UPDATE SET total = farme_daily.total + EXCLUDED.total`,
+     DO UPDATE SET total = farme_daily_checks.total + EXCLUDED.total`,
     [guildId, dk, userId, itemValue, quantidade]
   );
 }
 
 async function getApprovedCount(guildId, dateKey, userId, itemValue) {
   const { rows } = await pool.query(
-    `SELECT total FROM farme_daily
+    `SELECT total FROM farme_daily_checks
      WHERE "guildId"=$1 AND "dateKey"=$2 AND "userId"=$3 AND "itemValue"=$4
      LIMIT 1`,
     [guildId, dateKey, userId, itemValue]
@@ -524,10 +507,10 @@ async function missStreakUntil(guildId, dateKey, userId, itemValue, maxLookbackD
   return streak;
 }
 
-async function getUserTotals(guildId, userId) {
+async function getUserTotalsFromTable(tableName, guildId, userId) {
   const { rows } = await pool.query(
     `SELECT "itemValue", total
-     FROM farme_totals
+     FROM ${tableName}
      WHERE "guildId"=$1 AND "userId"=$2`,
     [guildId, userId]
   );
@@ -543,11 +526,15 @@ async function getUserTotals(guildId, userId) {
   return { total, items };
 }
 
-async function getRanking(guildId, limit = 10) {
+async function getUserDailyTotals(guildId, userId) {
+  return getUserTotalsFromTable("farme_daily_totals", guildId, userId);
+}
+
+async function getRankingWeekly(guildId, limit = 10) {
   const { rows } = await pool.query(
     `
     SELECT "userId", COALESCE(SUM(total),0)::int AS total
-    FROM farme_totals
+    FROM farme_weekly_totals
     WHERE "guildId"=$1
     GROUP BY "userId"
     HAVING COALESCE(SUM(total),0) > 0
@@ -575,6 +562,16 @@ async function getFixedMessage(guildId, chave) {
     [guildId, chave]
   );
   return rows[0]?.valor || null;
+}
+
+async function getFixedMessagesByPrefix(guildId, prefix) {
+  const { rows } = await pool.query(
+    `SELECT chave, valor
+     FROM farme_fixed_messages
+     WHERE "guildId"=$1 AND chave LIKE $2`,
+    [guildId, `${prefix}%`]
+  );
+  return rows;
 }
 
 async function sendLog(guild, content, embed) {
@@ -627,27 +624,24 @@ async function cleanupDB() {
     const closedCutoff = new Date(now - daysToMs(DELETE_CLOSED_OLDER_THAN_DAYS));
     const pendingCutoff = new Date(now - daysToMs(DELETE_PENDING_OLDER_THAN_DAYS));
 
-    const r1 = await pool.query(
+    await pool.query(
       `DELETE FROM farme_requests
        WHERE status='closed' AND "createdAt" < $1`,
       [closedCutoff]
     );
 
-    const r2 = await pool.query(
+    await pool.query(
       `DELETE FROM farme_requests
        WHERE status='pending' AND "createdAt" < $1`,
       [pendingCutoff]
     );
-
-    const removed = Number(r1.rowCount || 0) + Number(r2.rowCount || 0);
-    if (removed > 0) console.log(`🧹 Cleanup DB: removi ${removed} requests antigos.`);
   } catch (e) {
-    console.error("❌ Cleanup falhou:", e);
+    console.error("Cleanup falhou:", e);
   }
 }
 
 // ======================================================
-// 📌 LEADERBOARD FIXA
+// 📌 LEADERBOARD FIXA (SEMANAL)
 // ======================================================
 function buildLeaderboardEmbed(guild, rows) {
   const desc = rows.length
@@ -657,12 +651,12 @@ function buildLeaderboardEmbed(guild, rows) {
           return `${medal} **${i + 1}.** <@${e.userId}> — **${e.total}**`;
         })
         .join("\n")
-    : "Ainda não tem farmes aprovados.";
+    : "Ainda não tem farmes aprovados nesta semana.";
 
   return new EmbedBuilder()
-    .setTitle("🏆 Leaderboard de Farmes (fixa)")
+    .setTitle("🏆 Leaderboard Semanal de Farmes")
     .setDescription(desc)
-    .setFooter({ text: `Atualizado automaticamente • Servidor: ${guild.name}` })
+    .setFooter({ text: `Atualizado automaticamente • ${guild.name}` })
     .setTimestamp(new Date());
 }
 
@@ -673,39 +667,35 @@ async function updateLeaderboardFixed(guild) {
   const channel = await guild.channels.fetch(cfg.LEADERBOARD_CHANNEL_ID).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
 
-  const rows = await getRanking(guild.id, 10);
+  const rows = await getRankingWeekly(guild.id, 10);
   const embed = buildLeaderboardEmbed(guild, rows);
 
   const existingId = await getFixedMessage(guild.id, "leaderboardMessageId");
   if (existingId) {
     const msg = await channel.messages.fetch(existingId).catch(() => null);
     if (msg) {
-      await msg.edit({ content: "📌 **Ranking fixo (auto)**", embeds: [embed] }).catch(() => null);
+      await msg.edit({ content: "📌 **Ranking semanal (auto)**", embeds: [embed] }).catch(() => null);
       return;
     }
   }
 
-  const created = await channel.send({ content: "📌 **Ranking fixo (auto)**", embeds: [embed] }).catch(() => null);
+  const created = await channel.send({ content: "📌 **Ranking semanal (auto)**", embeds: [embed] }).catch(() => null);
   if (created) {
     await setFixedMessage(guild.id, "leaderboardMessageId", created.id);
   }
 }
 
 // ======================================================
-// 📊 PRODUTIVIDADE FIXA
+// 📊 PRODUTIVIDADE FIXA (DIÁRIA)
 // ======================================================
 function buildProductivityEmbedFor(guild, userId, totals) {
-  const items = FARME_OPTIONS
-    .map((o) => ({ label: o.label, value: o.value, n: totals.items[o.value] || 0 }))
-    .filter((x) => x.n > 0);
-
-  const lines = items.length ? items.map((x) => `• **${x.label}:** ${x.n}`).join("\n") : "— (ainda não tem farmes aprovados)";
+  const lines = FARME_OPTIONS.map((o) => `• **${o.label}:** ${totals.items[o.value] || 0}`).join("\n");
 
   return new EmbedBuilder()
-    .setTitle("📊 Painel de Produtividade")
+    .setTitle("📊 Painel de Produtividade (Diário)")
     .setDescription(`👤 <@${userId}>\n\n${lines}`)
-    .addFields({ name: "🏁 Total", value: String(totals.total || 0), inline: true })
-    .setFooter({ text: `Atualiza quando aprova/ajusta • ${guild.name}` })
+    .addFields({ name: "🏁 Total do dia", value: String(totals.total || 0), inline: true })
+    .setFooter({ text: `Zera todo dia às 03:05 • ${guild.name}` })
     .setTimestamp(new Date());
 }
 
@@ -716,7 +706,7 @@ async function updateProductivityPanelFor(guild, userId) {
   const channel = await guild.channels.fetch(cfg.PRODUCTIVITY_CHANNEL_ID).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
 
-  const totals = await getUserTotals(guild.id, userId);
+  const totals = await getUserDailyTotals(guild.id, userId);
   const embed = buildProductivityEmbedFor(guild, userId, totals);
 
   const key = `productivity:${userId}`;
@@ -741,8 +731,18 @@ async function updatePanelsAfterChange(guild, userId) {
   await updateProductivityPanelFor(guild, userId).catch(() => null);
 }
 
+async function refreshAllExistingProductivityPanels(guild) {
+  const rows = await getFixedMessagesByPrefix(guild.id, "productivity:");
+  for (const row of rows) {
+    const userId = row.chave.replace("productivity:", "");
+    if (userId) {
+      await updateProductivityPanelFor(guild, userId).catch(() => null);
+    }
+  }
+}
+
 // ======================================================
-// 📅 RELATÓRIO DIÁRIO
+// 📅 RELATÓRIOS / RESETS
 // ======================================================
 async function buildStaffRow(guildId, userId, displayName, dateKey) {
   const doneParts = [];
@@ -780,11 +780,75 @@ async function runDailyAuditAndReport() {
   }
 }
 
+async function resetDailyProductivity(guild) {
+  await pool.query(`DELETE FROM farme_daily_totals WHERE "guildId"=$1`, [guild.id]);
+  await refreshAllExistingProductivityPanels(guild);
+}
+
+async function sendWeeklyRankingReportAndReset(guild) {
+  const cfg = getCfg(guild.id);
+  if (!cfg) return;
+
+  const ranking = await getRankingWeekly(guild.id, 10);
+
+  const now = DateTime.now().setZone(TZ);
+  const weekEnd = now.minus({ days: 1 });
+  const weekStart = weekEnd.minus({ days: 6 });
+
+  const periodText = `${weekStart.toFormat("dd/MM/yyyy")} até ${weekEnd.toFormat("dd/MM/yyyy")}`;
+
+  const desc = ranking.length
+    ? ranking
+        .map((e, i) => {
+          const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "🔸";
+          return `${medal} **${i + 1}.** <@${e.userId}> — **${e.total}**`;
+        })
+        .join("\n")
+    : "Ninguém pontuou nesta semana.";
+
+  const winnerText = ranking.length ? `<@${ranking[0].userId}>` : "Sem vencedor";
+
+  const embed = new EmbedBuilder()
+    .setTitle("🏁 Fechamento Semanal de Farmes")
+    .setDescription(desc)
+    .addFields(
+      { name: "📆 Período", value: periodText, inline: false },
+      { name: "👑 Vencedor", value: winnerText, inline: false }
+    )
+    .setTimestamp(new Date());
+
+  await sendStaffTable(
+    guild,
+    `📣 **Relatório semanal fechado automaticamente**\nServidor: **${guild.name}**`,
+    [embed]
+  );
+
+  await pool.query(`DELETE FROM farme_weekly_totals WHERE "guildId"=$1`, [guild.id]);
+  await updateLeaderboardFixed(guild);
+}
+
+async function dailySchedulerRun() {
+  const now = DateTime.now().setZone(TZ);
+
+  for (const guild of client.guilds.cache.values()) {
+    if (!getCfg(guild.id)) continue;
+
+    if (now.weekday === 1) {
+      await sendWeeklyRankingReportAndReset(guild).catch(() => null);
+    }
+
+    await resetDailyProductivity(guild).catch(() => null);
+  }
+
+  await runDailyAuditAndReport().catch(() => null);
+}
+
 // ======================================================
 // 🛠️ SLASH COMMANDS
 // ======================================================
 const commands = [
   new SlashCommandBuilder().setName("farme").setDescription("Abra o menu e crie seu canal privado de farme."),
+
   new SlashCommandBuilder()
     .setName("enviarfarme")
     .setDescription("Enviar seu farme (quantidade + print) para aprovação.")
@@ -794,9 +858,15 @@ const commands = [
     .addAttachmentOption((opt) =>
       opt.setName("print").setDescription("Envie o print/anexo como prova").setRequired(true)
     ),
-  new SlashCommandBuilder().setName("meusfarmes").setDescription("Mostra seus totais aprovados por item."),
-  new SlashCommandBuilder().setName("ranking").setDescription("Mostra o ranking geral de farmes (top 10)."),
-  new SlashCommandBuilder().setName("gerenciarcanal").setDescription("(Staff) Abre painel para Fechar/Encerrar/Ajustar o canal atual."),
+
+  new SlashCommandBuilder().setName("meusfarmes").setDescription("Mostra seus totais do dia por item."),
+
+  new SlashCommandBuilder().setName("ranking").setDescription("Mostra o ranking semanal de farmes (top 10)."),
+
+  new SlashCommandBuilder()
+    .setName("gerenciarcanal")
+    .setDescription("(Staff) Abre painel para Fechar/Encerrar/Ajustar o canal atual."),
+
   new SlashCommandBuilder()
     .setName("testardiario")
     .setDescription("(Staff) Posta no canal staff a tabela por cargos.")
@@ -814,6 +884,7 @@ const commands = [
     .addStringOption((opt) =>
       opt.setName("data").setDescription('Se "dia" = data, coloque aqui: YYYY-MM-DD').setRequired(false)
     ),
+
   new SlashCommandBuilder().setName("ajuda").setDescription("Mostra os comandos disponíveis para o seu cargo."),
 ].map((c) => c.toJSON());
 
@@ -822,12 +893,10 @@ async function registerCommands() {
     const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
     for (const guildId of Object.keys(CONFIGS)) {
-      console.log(`🛠️ Registrando slash commands na guild ${guildId}...`);
       await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId), { body: commands });
-      console.log(`✅ Slash commands registrados na guild ${guildId}`);
     }
   } catch (err) {
-    console.error("❌ ERRO ao registrar commands:", err?.rawError || err);
+    console.error("ERRO ao registrar commands:", err?.rawError || err);
   }
 }
 
@@ -835,15 +904,13 @@ async function registerCommands() {
 // READY
 // ======================================================
 client.once("clientReady", async () => {
-  console.log(`✅ BOT REALMENTE ONLINE: ${client.user.tag}`);
-
   await cleanupDB().catch(() => null);
   setInterval(() => cleanupDB().catch(() => null), CLEANUP_EVERY_MS);
 
   cron.schedule(
     "5 3 * * *",
     async () => {
-      await runDailyAuditAndReport().catch((e) => console.error("Daily job error:", e));
+      await dailySchedulerRun().catch((e) => console.error("Daily scheduler error:", e));
     },
     { timezone: TZ }
   );
@@ -861,26 +928,12 @@ client.once("clientReady", async () => {
   for (const guild of client.guilds.cache.values()) {
     await updateLeaderboardFixed(guild).catch(() => null);
   }
-
-  console.log(`⏰ Daily job: 03:05 (${TZ}) | Auto refresh leaderboard: 5 em 5 min`);
 });
 
 // ======================================================
 // INTERACTIONS
 // ======================================================
 client.on("interactionCreate", async (interaction) => {
-  console.log("[INTERACTION]", {
-    type: interaction.type,
-    commandName: interaction.isChatInputCommand() ? interaction.commandName : null,
-    customId:
-      interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit()
-        ? interaction.customId
-        : null,
-    guildId: interaction.guild?.id || null,
-    channelId: interaction.channelId || null,
-    userId: interaction.user?.id || null,
-  });
-
   try {
     if (!interaction.guild) {
       if (interaction.isRepliable()) {
@@ -899,18 +952,14 @@ client.on("interactionCreate", async (interaction) => {
 
     const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
 
-    // ==================================================
     // /ajuda
-    // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "ajuda") {
       await interaction.deferReply({ ephemeral: true });
       const embed = getHelpEmbedFor(member, cfg);
       return interaction.editReply({ embeds: [embed] });
     }
 
-    // ==================================================
     // /testardiario
-    // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "testardiario") {
       await interaction.deferReply({ ephemeral: true });
 
@@ -961,9 +1010,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.editReply("✅ Postei a tabela no canal staff.");
     }
 
-    // ==================================================
     // /farme
-    // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "farme") {
       await interaction.deferReply({ ephemeral: true });
 
@@ -982,9 +1029,7 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // ==================================================
     // /gerenciarcanal
-    // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "gerenciarcanal") {
       await interaction.deferReply({ ephemeral: true });
 
@@ -1003,9 +1048,7 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // ==================================================
     // /enviarfarme
-    // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "enviarfarme") {
       await interaction.deferReply({ ephemeral: true });
 
@@ -1068,47 +1111,41 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.editReply({ content: "✅ Enviado! Aguarde aprovação do 00/Gerente." });
     }
 
-    // ==================================================
     // /meusfarmes
-    // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "meusfarmes") {
       await interaction.deferReply({ ephemeral: true });
 
-      const totals = await getUserTotals(interaction.guild.id, interaction.user.id);
+      const totals = await getUserDailyTotals(interaction.guild.id, interaction.user.id);
       const lines = FARME_OPTIONS.map((o) => `• **${o.label}**: ${totals.items[o.value] || 0}`).join("\n");
 
       const embed = new EmbedBuilder()
-        .setTitle("📊 Sua Tabela de Farmes")
+        .setTitle("📊 Sua Tabela de Farmes (Hoje)")
         .setDescription(lines)
-        .addFields({ name: "🏁 Total", value: String(totals.total), inline: false })
+        .addFields({ name: "🏁 Total do dia", value: String(totals.total), inline: false })
         .setTimestamp(new Date());
 
       return interaction.editReply({ embeds: [embed] });
     }
 
-    // ==================================================
     // /ranking
-    // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "ranking") {
       await interaction.deferReply({ ephemeral: true });
 
-      const entries = await getRanking(interaction.guild.id, 10);
+      const entries = await getRankingWeekly(interaction.guild.id, 10);
       if (!entries.length) {
-        return interaction.editReply({ content: "Ainda não tem farmes aprovados no ranking." });
+        return interaction.editReply({ content: "Ainda não tem farmes aprovados nesta semana." });
       }
 
       const desc = entries.map((e, i) => `**${i + 1}.** <@${e.userId}> — **${e.total}**`).join("\n");
       const embed = new EmbedBuilder()
-        .setTitle("🏆 Ranking de Farmes (Top 10)")
+        .setTitle("🏆 Ranking Semanal de Farmes (Top 10)")
         .setDescription(desc)
         .setTimestamp(new Date());
 
       return interaction.editReply({ embeds: [embed] });
     }
 
-    // ==================================================
     // MENU /farme
-    // ==================================================
     if (interaction.isStringSelectMenu() && interaction.customId === "farme_menu") {
       const selected = interaction.values[0];
       const opt = FARME_OPTIONS.find((o) => o.value === selected);
@@ -1190,9 +1227,7 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // ==================================================
     // BOTÃO APROVAR
-    // ==================================================
     if (interaction.isButton() && interaction.customId === "farme_public_aprovar") {
       await interaction.deferReply({ ephemeral: true });
 
@@ -1222,7 +1257,8 @@ client.on("interactionCreate", async (interaction) => {
       );
 
       await markApprovedToday(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
-      await addTotals(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
+      await addDailyTotals(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
+      await addWeeklyTotals(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
 
       const embed = makeRequestEmbed({
         userTag: req.userTag,
@@ -1261,9 +1297,7 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // ==================================================
-    // BOTÃO NEGAR -> MODAL
-    // ==================================================
+    // BOTÃO NEGAR
     if (interaction.isButton() && interaction.customId === "farme_public_negar") {
       if (!isStaff(member, cfg)) {
         return interaction.reply({ content: "❌ Apenas **00** ou **Gerente** pode aprovar/negar.", ephemeral: true });
@@ -1294,9 +1328,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.showModal(modal);
     }
 
-    // ==================================================
     // MODAL NEGAR
-    // ==================================================
     if (interaction.isModalSubmit() && interaction.customId.startsWith("farme_modal_negar:")) {
       await interaction.deferReply({ ephemeral: true });
 
@@ -1371,9 +1403,7 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // ==================================================
     // PAINEL STAFF
-    // ==================================================
     if (interaction.isButton() && interaction.customId.startsWith("farme_staff_")) {
       const [action, requestId] = interaction.customId.split(":");
       const req = await getRequestByRequestId(interaction.guild.id, requestId);
@@ -1477,9 +1507,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.editReply("⚠️ Ação desconhecida.");
     }
 
-    // ==================================================
     // MODAL AJUSTAR (00)
-    // ==================================================
     if (interaction.isModalSubmit() && interaction.customId.startsWith("farme_modal_ajustar:")) {
       await interaction.deferReply({ ephemeral: true });
 
@@ -1527,7 +1555,8 @@ client.on("interactionCreate", async (interaction) => {
       );
 
       if (req.status === "approved" || req.status === "closed") {
-        await addTotals(interaction.guild.id, req.userId, req.itemValue, delta);
+        await addDailyTotals(interaction.guild.id, req.userId, req.itemValue, delta);
+        await addWeeklyTotals(interaction.guild.id, req.userId, req.itemValue, delta);
       }
 
       const req2 = await getRequestByRequestId(interaction.guild.id, requestId);
@@ -1572,7 +1601,7 @@ client.on("interactionCreate", async (interaction) => {
       );
     }
   } catch (err) {
-    console.error("🔥 interactionCreate ERROR:", err);
+    console.error("interactionCreate ERROR:", err);
     if (interaction.isRepliable()) {
       if (interaction.deferred || interaction.replied) {
         await interaction.followUp({ content: "❌ Deu erro. Olha o console do Render.", ephemeral: true }).catch(() => null);
@@ -1588,34 +1617,25 @@ client.on("interactionCreate", async (interaction) => {
 // ======================================================
 (async () => {
   try {
-    console.log("🚀 Iniciando bot...");
-
     await initDB();
 
-    registerCommands()
-      .then(() => console.log("✅ registerCommands terminou"))
-      .catch((e) => console.error("❌ registerCommands falhou:", e?.rawError || e));
-
-    console.log("🔑 Fazendo login no Discord...");
+    registerCommands().catch((e) => console.error("registerCommands falhou:", e?.rawError || e));
 
     const loginTimeout = setTimeout(() => {
-      console.error("❌ Login travou por 30s. Reiniciando processo...");
+      console.error("Login travou por 30s. Reiniciando processo...");
       process.exit(1);
-    }, 30_000);
+    }, 30000);
 
     client
       .login(process.env.DISCORD_TOKEN)
-      .then(() => {
-        clearTimeout(loginTimeout);
-        console.log("✅ login() resolveu. Aguardando READY...");
-      })
+      .then(() => clearTimeout(loginTimeout))
       .catch((e) => {
         clearTimeout(loginTimeout);
-        console.error("❌ LOGIN ERROR:", e?.rawError || e);
+        console.error("LOGIN ERROR:", e?.rawError || e);
         process.exit(1);
       });
   } catch (err) {
-    console.error("❌ ERRO AO INICIAR BOT:", err);
+    console.error("ERRO AO INICIAR BOT:", err);
     process.exit(1);
   }
 })();
