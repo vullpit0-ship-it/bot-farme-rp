@@ -738,7 +738,7 @@ async function updateDailyPanelFor(guild, userId) {
     title: "📊 Painel Diário de Produção",
     userId,
     totals,
-    footerText: `Zera todo dia às 03:05 • ${guild.name}`,
+    footerText: `Zera todo dia às 00:05 • ${guild.name}`,
   });
 
   await upsertUserPanelMessage({
@@ -759,7 +759,7 @@ async function updateWeeklyPanelFor(guild, userId) {
     title: "🏆 Painel Semanal de Produção",
     userId,
     totals,
-    footerText: `Zera toda segunda às 03:05 • ${guild.name}`,
+    footerText: `Zera toda segunda às 00:05 • ${guild.name}`,
   });
 
   await upsertUserPanelMessage({
@@ -988,7 +988,7 @@ client.once("clientReady", async () => {
     { timezone: TZ }
   );
 
-  console.log(`Jobs ativos: reset diário 03:05 e reset semanal segunda 03:05 (${TZ})`);
+  console.log(`Jobs ativos: reset diário 00:05 e reset semanal segunda 00:05 (${TZ})`);
 });
 
 // ======================================================
