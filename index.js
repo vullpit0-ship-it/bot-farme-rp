@@ -786,9 +786,6 @@ async function resetDailyProductivity(guild) {
 }
 
 async function sendWeeklyRankingReportAndReset(guild) {
-  const cfg = getCfg(guild.id);
-  if (!cfg) return;
-
   const ranking = await getRankingWeekly(guild.id, 10);
 
   const now = DateTime.now().setZone(TZ);
@@ -1239,6 +1236,10 @@ client.on("interactionCreate", async (interaction) => {
       const req = await getRequestByRequestId(interaction.guild.id, requestId);
       if (!req) return interaction.editReply("❌ Não encontrei essa solicitação no banco.");
 
+      if (req.userId === interaction.user.id) {
+        return interaction.editReply("❌ Você não pode **aprovar o seu próprio farme**.");
+      }
+
       if (req.status !== "pending") {
         return interaction.editReply({
           content: "⚠️ Esse pedido já foi avaliado. Painel staff:",
@@ -1307,6 +1308,10 @@ client.on("interactionCreate", async (interaction) => {
       const req = await getRequestByRequestId(interaction.guild.id, requestId);
       if (!req) return interaction.reply({ content: "❌ Pedido não encontrado.", ephemeral: true });
 
+      if (req.userId === interaction.user.id) {
+        return interaction.reply({ content: "❌ Você não pode **negar o seu próprio farme**.", ephemeral: true });
+      }
+
       if (req.status !== "pending") {
         return interaction.reply({
           content: "⚠️ Esse pedido já foi avaliado.",
@@ -1339,6 +1344,10 @@ client.on("interactionCreate", async (interaction) => {
       const requestId = interaction.customId.split(":")[1];
       const req = await getRequestByRequestId(interaction.guild.id, requestId);
       if (!req) return interaction.editReply("❌ Pedido não encontrado.");
+
+      if (req.userId === interaction.user.id) {
+        return interaction.editReply("❌ Você não pode **negar o seu próprio farme**.");
+      }
 
       if (req.status !== "pending") {
         return interaction.editReply({
