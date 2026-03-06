@@ -99,9 +99,7 @@ const CONFIGS = {
 
     CLOSED_CATEGORY_ID: "",
 
-    DAILY_DM_WHITELIST: [
-      // coloque userIds reais aqui se quiser DM diária
-    ],
+    DAILY_DM_WHITELIST: [],
   },
 
   [GUILD_ID_NOVA_ORDEM]: {
@@ -154,7 +152,9 @@ const client = new Client({
 client.on("warn", (m) => console.warn("⚠️ WARN:", m));
 client.on("error", (e) => console.error("🔥 CLIENT ERROR:", e));
 client.on("shardError", (e) => console.error("🔥 SHARD ERROR:", e));
-client.on("shardDisconnect", (event, shardId) => console.warn(`⚠️ SHARD ${shardId} DISCONNECT:`, event?.reason || event));
+client.on("shardDisconnect", (event, shardId) =>
+  console.warn(`⚠️ SHARD ${shardId} DISCONNECT:`, event?.reason || event)
+);
 client.on("shardReconnecting", (shardId) => console.warn(`♻️ SHARD ${shardId} RECONNECTING...`));
 client.on("shardResume", (shardId) => console.log(`✅ SHARD ${shardId} RESUMED.`));
 client.on("invalidated", () => console.error("🔥 CLIENT INVALIDATED"));
@@ -872,7 +872,10 @@ client.on("interactionCreate", async (interaction) => {
   console.log("[INTERACTION]", {
     type: interaction.type,
     commandName: interaction.isChatInputCommand() ? interaction.commandName : null,
-    customId: interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit() ? interaction.customId : null,
+    customId:
+      interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit()
+        ? interaction.customId
+        : null,
     guildId: interaction.guild?.id || null,
     channelId: interaction.channelId || null,
     userId: interaction.user?.id || null,
@@ -894,12 +897,14 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
+    const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+
     // ==================================================
     // /ajuda
     // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "ajuda") {
       await interaction.deferReply({ ephemeral: true });
-      const embed = getHelpEmbedFor(interaction.member, cfg);
+      const embed = getHelpEmbedFor(member, cfg);
       return interaction.editReply({ embeds: [embed] });
     }
 
@@ -907,11 +912,11 @@ client.on("interactionCreate", async (interaction) => {
     // /testardiario
     // ==================================================
     if (interaction.isChatInputCommand() && interaction.commandName === "testardiario") {
-      if (!isStaff(interaction.member, cfg)) {
-        return interaction.reply({ content: "❌ Apenas 00/Gerente.", ephemeral: true });
-      }
-
       await interaction.deferReply({ ephemeral: true });
+
+      if (!isStaff(member, cfg)) {
+        return interaction.editReply({ content: "❌ Apenas 00/Gerente." });
+      }
 
       const dia = interaction.options.getString("dia", true);
       const dataStr = interaction.options.getString("data", false);
@@ -983,7 +988,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isChatInputCommand() && interaction.commandName === "gerenciarcanal") {
       await interaction.deferReply({ ephemeral: true });
 
-      if (!isStaff(interaction.member, cfg)) {
+      if (!isStaff(member, cfg)) {
         return interaction.editReply({ content: "❌ Apenas 00/Gerente." });
       }
 
@@ -994,7 +999,7 @@ client.on("interactionCreate", async (interaction) => {
 
       return interaction.editReply({
         content: `🛠️ Painel do canal atual (Pedido: ${latest.status})`,
-        components: [staffPanelButtons(latest.requestId, is00(interaction.member, cfg))],
+        components: [staffPanelButtons(latest.requestId, is00(member, cfg))],
       });
     }
 
@@ -1191,7 +1196,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isButton() && interaction.customId === "farme_public_aprovar") {
       await interaction.deferReply({ ephemeral: true });
 
-      if (!isStaff(interaction.member, cfg)) {
+      if (!isStaff(member, cfg)) {
         return interaction.editReply("❌ Apenas **00** ou **Gerente** pode aprovar/negar.");
       }
 
@@ -1202,7 +1207,7 @@ client.on("interactionCreate", async (interaction) => {
       if (req.status !== "pending") {
         return interaction.editReply({
           content: "⚠️ Esse pedido já foi avaliado. Painel staff:",
-          components: [staffPanelButtons(requestId, is00(interaction.member, cfg))],
+          components: [staffPanelButtons(requestId, is00(member, cfg))],
         });
       }
 
@@ -1229,11 +1234,13 @@ client.on("interactionCreate", async (interaction) => {
         adjustedInfo: req.adjustedNote || null,
       }).setImage(req.printUrl);
 
-      await interaction.message.edit({
-        content: `📣 Pedido aprovado por **${interaction.user.tag}**.`,
-        embeds: [embed],
-        components: [publicButtons({ disabled: true })],
-      }).catch(() => null);
+      await interaction.message
+        .edit({
+          content: `📣 Pedido aprovado por **${interaction.user.tag}**.`,
+          embeds: [embed],
+          components: [publicButtons({ disabled: true })],
+        })
+        .catch(() => null);
 
       await safeNotifyDM(
         req.userId,
@@ -1250,7 +1257,7 @@ client.on("interactionCreate", async (interaction) => {
 
       return interaction.editReply({
         content: "✅ Aprovado. Painel staff:",
-        components: [staffPanelButtons(requestId, is00(interaction.member, cfg))],
+        components: [staffPanelButtons(requestId, is00(member, cfg))],
       });
     }
 
@@ -1258,7 +1265,7 @@ client.on("interactionCreate", async (interaction) => {
     // BOTÃO NEGAR -> MODAL
     // ==================================================
     if (interaction.isButton() && interaction.customId === "farme_public_negar") {
-      if (!isStaff(interaction.member, cfg)) {
+      if (!isStaff(member, cfg)) {
         return interaction.reply({ content: "❌ Apenas **00** ou **Gerente** pode aprovar/negar.", ephemeral: true });
       }
 
@@ -1269,14 +1276,12 @@ client.on("interactionCreate", async (interaction) => {
       if (req.status !== "pending") {
         return interaction.reply({
           content: "⚠️ Esse pedido já foi avaliado.",
-          components: [staffPanelButtons(requestId, is00(interaction.member, cfg))],
+          components: [staffPanelButtons(requestId, is00(member, cfg))],
           ephemeral: true,
         });
       }
 
-      const modal = new ModalBuilder()
-        .setCustomId(`farme_modal_negar:${requestId}`)
-        .setTitle("Motivo da negação");
+      const modal = new ModalBuilder().setCustomId(`farme_modal_negar:${requestId}`).setTitle("Motivo da negação");
 
       const reasonInput = new TextInputBuilder()
         .setCustomId("deny_reason")
@@ -1295,7 +1300,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isModalSubmit() && interaction.customId.startsWith("farme_modal_negar:")) {
       await interaction.deferReply({ ephemeral: true });
 
-      if (!isStaff(interaction.member, cfg)) {
+      if (!isStaff(member, cfg)) {
         return interaction.editReply("❌ Apenas **00** ou **Gerente** pode negar.");
       }
 
@@ -1306,7 +1311,7 @@ client.on("interactionCreate", async (interaction) => {
       if (req.status !== "pending") {
         return interaction.editReply({
           content: "⚠️ Esse pedido já foi avaliado.",
-          components: [staffPanelButtons(requestId, is00(interaction.member, cfg))],
+          components: [staffPanelButtons(requestId, is00(member, cfg))],
         });
       }
 
@@ -1339,11 +1344,13 @@ client.on("interactionCreate", async (interaction) => {
       if (channel && channel.isTextBased()) {
         const msg = await channel.messages.fetch(req.messageId).catch(() => null);
         if (msg) {
-          await msg.edit({
-            content: `📣 Pedido negado por **${interaction.user.tag}**.`,
-            embeds: [embed],
-            components: [publicButtons({ disabled: true })],
-          }).catch(() => null);
+          await msg
+            .edit({
+              content: `📣 Pedido negado por **${interaction.user.tag}**.`,
+              embeds: [embed],
+              components: [publicButtons({ disabled: true })],
+            })
+            .catch(() => null);
         }
       }
 
@@ -1360,7 +1367,7 @@ client.on("interactionCreate", async (interaction) => {
 
       return interaction.editReply({
         content: "✅ Negado com motivo. Painel staff:",
-        components: [staffPanelButtons(requestId, is00(interaction.member, cfg))],
+        components: [staffPanelButtons(requestId, is00(member, cfg))],
       });
     }
 
@@ -1372,19 +1379,17 @@ client.on("interactionCreate", async (interaction) => {
       const req = await getRequestByRequestId(interaction.guild.id, requestId);
 
       if (!req) return interaction.reply({ content: "❌ Pedido não encontrado.", ephemeral: true });
-      if (!isStaff(interaction.member, cfg)) return interaction.reply({ content: "❌ Apenas staff.", ephemeral: true });
+      if (!isStaff(member, cfg)) return interaction.reply({ content: "❌ Apenas staff.", ephemeral: true });
 
       if (action === "farme_staff_ajustar") {
-        if (!is00(interaction.member, cfg)) {
+        if (!is00(member, cfg)) {
           return interaction.reply({ content: "❌ Apenas o **00** pode ajustar valores.", ephemeral: true });
         }
         if (req.status === "pending") {
           return interaction.reply({ content: "❌ Ajuste só depois de aprovar/negar.", ephemeral: true });
         }
 
-        const modal = new ModalBuilder()
-          .setCustomId(`farme_modal_ajustar:${requestId}`)
-          .setTitle("Ajustar Farme (00)");
+        const modal = new ModalBuilder().setCustomId(`farme_modal_ajustar:${requestId}`).setTitle("Ajustar Farme (00)");
 
         const opInput = new TextInputBuilder()
           .setCustomId("op")
@@ -1426,9 +1431,11 @@ client.on("interactionCreate", async (interaction) => {
         if (!channel) return interaction.editReply("❌ Canal não encontrado.");
 
         await channel.permissionOverwrites.edit(req.userId, { ViewChannel: false }).catch(() => null);
+
         if (cfg.CLOSED_CATEGORY_ID) {
           await channel.setParent(cfg.CLOSED_CATEGORY_ID).catch(() => null);
         }
+
         await channel.setName(`fechado-${channel.name}`.slice(0, 90)).catch(() => null);
         await channel.send(`🔒 Canal fechado por <@${interaction.user.id}>. (Agora só staff vê.)`).catch(() => null);
 
@@ -1476,7 +1483,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isModalSubmit() && interaction.customId.startsWith("farme_modal_ajustar:")) {
       await interaction.deferReply({ ephemeral: true });
 
-      if (!is00(interaction.member, cfg)) {
+      if (!is00(member, cfg)) {
         return interaction.editReply("❌ Apenas o **00** pode ajustar.");
       }
 
@@ -1530,9 +1537,13 @@ client.on("interactionCreate", async (interaction) => {
         const msg = await channel.messages.fetch(req.messageId).catch(() => null);
         if (msg) {
           const statusTxt =
-            req2.status === "approved" ? "🟢 Aprovado" :
-            req2.status === "denied" ? "🔴 Negado" :
-            req2.status === "closed" ? "🔒 Fechado" : "🟡 Pendente";
+            req2.status === "approved"
+              ? "🟢 Aprovado"
+              : req2.status === "denied"
+              ? "🔴 Negado"
+              : req2.status === "closed"
+              ? "🔒 Fechado"
+              : "🟡 Pendente";
 
           const embed = makeRequestEmbed({
             userTag: req2.userTag,
@@ -1592,7 +1603,8 @@ client.on("interactionCreate", async (interaction) => {
       process.exit(1);
     }, 30_000);
 
-    client.login(process.env.DISCORD_TOKEN)
+    client
+      .login(process.env.DISCORD_TOKEN)
       .then(() => {
         clearTimeout(loginTimeout);
         console.log("✅ login() resolveu. Aguardando READY...");
