@@ -13,7 +13,6 @@ const {
   Routes,
   SlashCommandBuilder,
   ActionRowBuilder,
-  StringSelectMenuBuilder,
   ChannelType,
   PermissionFlagsBits,
   ButtonBuilder,
@@ -79,10 +78,7 @@ const CONFIGS = {
     REPORT_CHANNEL_ID: "1479024598166012007",
     STAFF_TABLE_CHANNEL_ID: "1479158423684649167",
 
-    // 1479185447367479389 = painel semanal bonito por membro
     WEEKLY_PANEL_CHANNEL_ID: "1479185447367479389",
-
-    // 1479185862196461638 = painel diário bonito por membro
     DAILY_PANEL_CHANNEL_ID: "1479185862196461638",
 
     CLOSED_CATEGORY_ID: "",
@@ -122,21 +118,27 @@ const DELETE_CLOSED_OLDER_THAN_DAYS = 14;
 const DELETE_PENDING_OLDER_THAN_DAYS = 7;
 
 const FARME_OPTIONS = [
-  { label: "Pasta Base", value: "pasta-base", description: "Canal privado: Pasta Base" },
-  { label: "Estabilizador", value: "estabilizador", description: "Canal privado: Estabilizador" },
-  { label: "Saco Ziplock", value: "saco-ziplock", description: "Canal privado: Saco Ziplock" },
-  { label: "Folha Bruta", value: "folha-bruta", description: "Canal privado: Folha Bruta" },
+  { label: "Pasta Base", value: "pasta-base", description: "Pasta Base" },
+  { label: "Estabilizador", value: "estabilizador", description: "Estabilizador" },
+  { label: "Saco Ziplock", value: "saco-ziplock", description: "Saco Ziplock" },
+  { label: "Folha Bruta", value: "folha-bruta", description: "Folha Bruta" },
 ];
 
 const TOTAL_TABLES = new Set(["farme_daily_totals", "farme_weekly_totals"]);
 const PANEL_PREFIX_DAILY = "panel_daily:";
 const PANEL_PREFIX_WEEKLY = "panel_weekly:";
+const FARM_CHANNEL_ITEMVALUE = "__farm_panel__";
 
 // ======================================================
 // 🤖 CLIENT
 // ======================================================
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
   partials: [Partials.Channel],
 });
 
@@ -188,7 +190,6 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_farme_requests_status
     ON farme_requests ("guildId",status);
 
-    -- histórico diário para tabela /testardiario e metas do dia
     CREATE TABLE IF NOT EXISTS farme_daily_routes (
       id BIGSERIAL PRIMARY KEY,
       "guildId" TEXT NOT NULL,
@@ -199,7 +200,6 @@ async function initDB() {
       UNIQUE ("guildId","dateKey","userId","itemValue")
     );
 
-    -- painel diário por quantidade real
     CREATE TABLE IF NOT EXISTS farme_daily_totals (
       id BIGSERIAL PRIMARY KEY,
       "guildId" TEXT NOT NULL,
@@ -209,7 +209,6 @@ async function initDB() {
       UNIQUE ("guildId","userId","itemValue")
     );
 
-    -- painel semanal por quantidade real
     CREATE TABLE IF NOT EXISTS farme_weekly_totals (
       id BIGSERIAL PRIMARY KEY,
       "guildId" TEXT NOT NULL,
@@ -242,6 +241,17 @@ async function initDB() {
       chave TEXT NOT NULL,
       valor TEXT,
       UNIQUE ("guildId", chave)
+    );
+
+    CREATE TABLE IF NOT EXISTS farme_drafts (
+      id BIGSERIAL PRIMARY KEY,
+      "guildId" TEXT NOT NULL,
+      "channelId" TEXT NOT NULL,
+      "userId" TEXT NOT NULL,
+      quantities JSONB NOT NULL DEFAULT '{}'::jsonb,
+      "panelMessageId" TEXT,
+      "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE ("guildId","channelId","userId")
     );
   `);
 
@@ -279,6 +289,10 @@ function parseItemFromChannelName(channelName) {
   if (parts.length < 3) return null;
   const item = parts.slice(1, parts.length - 1).join("-");
   return FARME_OPTIONS.find((o) => o.value === item) || null;
+}
+
+function isFarmPanelChannel(channelName) {
+  return !!channelName && channelName.startsWith("farm-") && !channelName.startsWith("farme-");
 }
 
 function getItemLabel(itemValue) {
@@ -384,8 +398,8 @@ function getHelpEmbedFor(member, cfg) {
   const is_staff = isStaff(member, cfg);
 
   const memberCmds = [
-    { name: "/farme", desc: "Abrir menu e criar/abrir canal privado do item." },
-    { name: "/enviarfarme", desc: "Enviar farme (quantidade + print) para aprovação." },
+    { name: "/farme", desc: "Abre seu canal privado com o painel FARM." },
+    { name: "/enviarfarme", desc: "Fluxo antigo/manual. Hoje o ideal é usar o painel do /farme." },
     { name: "/meusfarmes", desc: "Ver seus totais do dia por item." },
     { name: "/ranking", desc: "Ver ranking semanal do servidor." },
     { name: "/ajuda", desc: "Ver os comandos disponíveis." },
@@ -410,6 +424,69 @@ function getHelpEmbedFor(member, cfg) {
     .addFields(...(is_staff ? [{ name: "🛡️ Comandos de Staff", value: fmt(gerenteCmds), inline: false }] : []))
     .addFields(...(is_00 ? [{ name: "👑 Extras do 00", value: fmt(extra00Cmds), inline: false }] : []))
     .setTimestamp(new Date());
+}
+
+function getEmptyDraftQuantities() {
+  const out = {};
+  for (const o of FARME_OPTIONS) out[o.value] = 0;
+  return out;
+}
+
+function normalizeDraftQuantities(raw) {
+  const base = getEmptyDraftQuantities();
+  if (!raw || typeof raw !== "object") return base;
+
+  for (const o of FARME_OPTIONS) {
+    const n = Number(raw[o.value] || 0);
+    base[o.value] = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+  }
+
+  return base;
+}
+
+function sumDraftQuantities(quantities) {
+  return FARME_OPTIONS.reduce((acc, o) => acc + Number(quantities?.[o.value] || 0), 0);
+}
+
+function buildFarmPanelEmbed(userId, quantities, hasPrint) {
+  const lines = FARME_OPTIONS.map((o) => `**${o.label}:** ${quantities[o.value] || 0}`).join("\n");
+
+  return new EmbedBuilder()
+    .setTitle("📦 FARM")
+    .setDescription(
+      `👤 <@${userId}>\n\n` +
+      `${lines}\n\n` +
+      `📎 **Print:** ${hasPrint ? "✅ detectado" : "❌ aguardando"}\n\n` +
+      `**Como usar:**\n` +
+      `1. Clique nos botões para ajustar as quantidades.\n` +
+      `2. Envie o print/imagem no canal.\n` +
+      `3. Clique em **ENVIAR**.`
+    )
+    .setTimestamp(new Date());
+}
+
+function buildFarmPanelButtons(quantities) {
+  const row1 = new ActionRowBuilder().addComponents(
+    ...FARME_OPTIONS.map((o) =>
+      new ButtonBuilder()
+        .setCustomId(`farm_edit:${o.value}`)
+        .setLabel(`${o.label} [${quantities[o.value] || 0}]`)
+        .setStyle(ButtonStyle.Primary)
+    )
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("farm_send")
+      .setLabel("ENVIAR")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId("farm_clear")
+      .setLabel("Limpar")
+      .setStyle(ButtonStyle.Secondary)
+  );
+
+  return [row1, row2];
 }
 
 // ======================================================
@@ -442,6 +519,17 @@ async function upsertChannelMap(guildId, userId, itemValue, channelId) {
      DO UPDATE SET "channelId"=EXCLUDED."channelId"`,
     [guildId, userId, itemValue, channelId]
   );
+}
+
+async function getMappedChannelId(guildId, userId, itemValue) {
+  const { rows } = await pool.query(
+    `SELECT "channelId"
+     FROM farme_channels
+     WHERE "guildId"=$1 AND "userId"=$2 AND "itemValue"=$3
+     LIMIT 1`,
+    [guildId, userId, itemValue]
+  );
+  return rows[0]?.channelId || null;
 }
 
 async function setCooldown(guildId, userId) {
@@ -619,6 +707,64 @@ async function getFixedMessagesByPrefix(guildId, prefix) {
   return rows;
 }
 
+async function ensureDraft(guildId, channelId, userId) {
+  await pool.query(
+    `INSERT INTO farme_drafts ("guildId","channelId","userId",quantities)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT ("guildId","channelId","userId")
+     DO NOTHING`,
+    [guildId, channelId, userId, getEmptyDraftQuantities()]
+  );
+}
+
+async function getDraft(guildId, channelId, userId) {
+  const { rows } = await pool.query(
+    `SELECT *
+     FROM farme_drafts
+     WHERE "guildId"=$1 AND "channelId"=$2 AND "userId"=$3
+     LIMIT 1`,
+    [guildId, channelId, userId]
+  );
+
+  if (!rows[0]) return null;
+
+  return {
+    ...rows[0],
+    quantities: normalizeDraftQuantities(rows[0].quantities),
+  };
+}
+
+async function setDraftQuantity(guildId, channelId, userId, itemValue, quantity) {
+  const draft = await getDraft(guildId, channelId, userId);
+  const next = normalizeDraftQuantities(draft?.quantities || {});
+  next[itemValue] = Math.max(0, Number(quantity || 0));
+
+  await pool.query(
+    `UPDATE farme_drafts
+     SET quantities=$1, "updatedAt"=NOW()
+     WHERE "guildId"=$2 AND "channelId"=$3 AND "userId"=$4`,
+    [next, guildId, channelId, userId]
+  );
+}
+
+async function clearDraft(guildId, channelId, userId) {
+  await pool.query(
+    `UPDATE farme_drafts
+     SET quantities=$1, "updatedAt"=NOW()
+     WHERE "guildId"=$2 AND "channelId"=$3 AND "userId"=$4`,
+    [getEmptyDraftQuantities(), guildId, channelId, userId]
+  );
+}
+
+async function setDraftPanelMessageId(guildId, channelId, userId, panelMessageId) {
+  await pool.query(
+    `UPDATE farme_drafts
+     SET "panelMessageId"=$1, "updatedAt"=NOW()
+     WHERE "guildId"=$2 AND "channelId"=$3 AND "userId"=$4`,
+    [panelMessageId, guildId, channelId, userId]
+  );
+}
+
 async function sendLog(guild, content, embed) {
   const cfg = getCfg(guild.id);
   if (!cfg?.LOG_CHANNEL_ID) return;
@@ -683,6 +829,166 @@ async function cleanupDB() {
   } catch (e) {
     console.error("Cleanup falhou:", e);
   }
+}
+
+// ======================================================
+// 📦 NOVO PAINEL FARM
+// ======================================================
+async function findLatestImageFromUser(channel, userId, limit = 30) {
+  const msgs = await channel.messages.fetch({ limit }).catch(() => null);
+  if (!msgs) return null;
+
+  for (const msg of msgs.values()) {
+    if (msg.author?.id !== userId) continue;
+    const img = msg.attachments.find((att) => att.contentType?.startsWith("image/"));
+    if (img) return img.url;
+  }
+
+  return null;
+}
+
+async function sendOrRefreshFarmPanel(channel, userId) {
+  await ensureDraft(channel.guild.id, channel.id, userId);
+  const draft = await getDraft(channel.guild.id, channel.id, userId);
+  if (!draft) return;
+
+  const printUrl = await findLatestImageFromUser(channel, userId);
+  const embed = buildFarmPanelEmbed(userId, draft.quantities, !!printUrl);
+  const components = buildFarmPanelButtons(draft.quantities);
+
+  if (draft.panelMessageId) {
+    const oldMsg = await channel.messages.fetch(draft.panelMessageId).catch(() => null);
+    if (oldMsg) {
+      await oldMsg.edit({ content: null, embeds: [embed], components }).catch(() => null);
+      return oldMsg;
+    }
+  }
+
+  const created = await channel.send({
+    content: `👋 <@${userId}> seu painel FARM está pronto.`,
+    embeds: [embed],
+    components,
+  }).catch(() => null);
+
+  if (created) {
+    await setDraftPanelMessageId(channel.guild.id, channel.id, userId, created.id);
+  }
+
+  return created;
+}
+
+async function createOrGetFarmChannel(guild, user, cfg) {
+  const mappedId = await getMappedChannelId(guild.id, user.id, FARM_CHANNEL_ITEMVALUE);
+
+  if (mappedId) {
+    const existingByMap = await guild.channels.fetch(mappedId).catch(() => null);
+    if (existingByMap && existingByMap.type === ChannelType.GuildText) {
+      return existingByMap;
+    }
+  }
+
+  const expectedName = `farm-${slugUser(user)}`.slice(0, 90);
+
+  let targetChannel = guild.channels.cache.find(
+    (c) => c.type === ChannelType.GuildText && c.name === expectedName
+  );
+
+  if (!targetChannel) {
+    targetChannel = await guild.channels.create({
+      name: expectedName,
+      type: ChannelType.GuildText,
+      parent: cfg.FARME_CATEGORY_ID || null,
+      permissionOverwrites: [
+        { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+        {
+          id: user.id,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages,
+            PermissionFlagsBits.ReadMessageHistory,
+            PermissionFlagsBits.AttachFiles,
+          ],
+        },
+        {
+          id: cfg.ROLE_00_ID,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages,
+            PermissionFlagsBits.ReadMessageHistory,
+            PermissionFlagsBits.ManageMessages,
+            PermissionFlagsBits.ManageChannels,
+          ],
+        },
+        {
+          id: cfg.GERENTE_ROLE_ID,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages,
+            PermissionFlagsBits.ReadMessageHistory,
+            PermissionFlagsBits.ManageMessages,
+            PermissionFlagsBits.ManageChannels,
+          ],
+        },
+      ],
+      topic: `Painel FARM de ${user.tag}`,
+    });
+  }
+
+  await upsertChannelMap(guild.id, user.id, FARM_CHANNEL_ITEMVALUE, targetChannel.id);
+  await ensureDraft(guild.id, targetChannel.id, user.id);
+
+  return targetChannel;
+}
+
+async function createPendingRequestsFromDraft({ guild, channel, user, quantities, printUrl }) {
+  const created = [];
+
+  for (const opt of FARME_OPTIONS) {
+    const quantidade = Number(quantities?.[opt.value] || 0);
+    if (quantidade <= 0) continue;
+
+    const embed = makeRequestEmbed({
+      userTag: user.tag,
+      userId: user.id,
+      itemLabel: opt.label,
+      quantidade,
+      status: "🟡 Pendente",
+    }).setImage(printUrl);
+
+    const msg = await channel.send({
+      content: `📣 Solicitação enviada por ${user}. (Aguardando **00/Gerente**)`,
+      embeds: [embed],
+      components: [publicButtons({ disabled: false })],
+    });
+
+    await pool.query(
+      `INSERT INTO farme_requests
+      ("guildId","requestId","messageId","channelId","userId","userTag","itemValue","itemLabel",quantidade,"originalQuantidade","printUrl",status)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending')`,
+      [
+        guild.id,
+        msg.id,
+        msg.id,
+        channel.id,
+        user.id,
+        user.tag,
+        opt.value,
+        opt.label,
+        quantidade,
+        quantidade,
+        printUrl,
+      ]
+    );
+
+    created.push({
+      requestId: msg.id,
+      itemValue: opt.value,
+      itemLabel: opt.label,
+      quantidade,
+    });
+  }
+
+  return created;
 }
 
 // ======================================================
@@ -888,11 +1194,11 @@ async function dailySchedulerRun() {
 // 🛠️ SLASH COMMANDS
 // ======================================================
 const commands = [
-  new SlashCommandBuilder().setName("farme").setDescription("Abra o menu e crie seu canal privado de farme."),
+  new SlashCommandBuilder().setName("farme").setDescription("Abre seu canal privado com o painel FARM."),
 
   new SlashCommandBuilder()
     .setName("enviarfarme")
-    .setDescription("Enviar seu farme (quantidade + print) para aprovação.")
+    .setDescription("Fluxo antigo/manual: enviar seu farme (quantidade + print) para aprovação.")
     .addIntegerOption((opt) =>
       opt.setName("quantidade").setDescription("Quantidade farmada").setRequired(true).setMinValue(1)
     )
@@ -1120,7 +1426,7 @@ client.on("interactionCreate", async (interaction) => {
       );
     }
 
-    // /farme
+    // /farme -> abre canal privado único + painel FARM
     if (interaction.isChatInputCommand() && interaction.commandName === "farme") {
       await interaction.deferReply({ ephemeral: true });
 
@@ -1128,14 +1434,17 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.editReply({ content: "❌ FARME_CATEGORY_ID não configurado neste servidor." });
       }
 
-      const menu = new StringSelectMenuBuilder()
-        .setCustomId("farme_menu")
-        .setPlaceholder("Escolha uma opção…")
-        .addOptions(FARME_OPTIONS);
+      const targetChannel = await createOrGetFarmChannel(interaction.guild, interaction.user, cfg);
+      await sendOrRefreshFarmPanel(targetChannel, interaction.user.id);
+
+      const goBtn = new ButtonBuilder()
+        .setStyle(ButtonStyle.Link)
+        .setLabel("➡️ Ir pro canal")
+        .setURL(channelLink(interaction.guild.id, targetChannel.id));
 
       return interaction.editReply({
-        content: "Selecione a opção para criar/abrir seu canal privado:",
-        components: [new ActionRowBuilder().addComponents(menu)],
+        content: "✅ Seu painel FARM está pronto.",
+        components: [new ActionRowBuilder().addComponents(goBtn)],
       });
     }
 
@@ -1158,14 +1467,20 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // /enviarfarme
+    // /enviarfarme (legado)
     if (interaction.isChatInputCommand() && interaction.commandName === "enviarfarme") {
       await interaction.deferReply({ ephemeral: true });
+
+      if (isFarmPanelChannel(interaction.channel?.name)) {
+        return interaction.editReply({
+          content: "❌ Neste canal use o **painel FARM** com o botão **ENVIAR**.",
+        });
+      }
 
       const opt = parseItemFromChannelName(interaction.channel?.name);
       if (!opt) {
         return interaction.editReply({
-          content: "❌ Use este comando dentro do seu canal de farme (farme-...-seunome).",
+          content: "❌ Use este comando dentro do seu canal antigo de farme (farme-...-seunome) ou use **/farme**.",
         });
       }
 
@@ -1255,84 +1570,105 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.editReply({ embeds: [embed] });
     }
 
-    // MENU /farme
-    if (interaction.isStringSelectMenu() && interaction.customId === "farme_menu") {
-      const selected = interaction.values[0];
-      const opt = FARME_OPTIONS.find((o) => o.value === selected);
+    // BOTÕES DO PAINEL FARM
+    if (interaction.isButton() && interaction.customId.startsWith("farm_edit:")) {
+      const itemValue = interaction.customId.split(":")[1];
+      const opt = FARME_OPTIONS.find((o) => o.value === itemValue);
 
       if (!opt) {
         return interaction.reply({ content: "❌ Item inválido.", ephemeral: true });
       }
 
-      const channelName = `farme-${selected}-${slugUser(interaction.user)}`.slice(0, 90);
+      const modal = new ModalBuilder()
+        .setCustomId(`farm_modal_qty:${itemValue}`)
+        .setTitle(`Quantidade - ${opt.label}`);
 
-      let targetChannel = interaction.guild.channels.cache.find(
-        (c) => c.type === ChannelType.GuildText && c.name === channelName
-      );
+      const qtyInput = new TextInputBuilder()
+        .setCustomId("qty")
+        .setLabel(`Digite a quantidade de ${opt.label}`)
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(10);
 
-      if (!targetChannel) {
-        targetChannel = await interaction.guild.channels.create({
-          name: channelName,
-          type: ChannelType.GuildText,
-          parent: cfg.FARME_CATEGORY_ID || null,
-          permissionOverwrites: [
-            { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-            {
-              id: interaction.user.id,
-              allow: [
-                PermissionFlagsBits.ViewChannel,
-                PermissionFlagsBits.SendMessages,
-                PermissionFlagsBits.ReadMessageHistory,
-                PermissionFlagsBits.AttachFiles,
-              ],
-            },
-            {
-              id: cfg.ROLE_00_ID,
-              allow: [
-                PermissionFlagsBits.ViewChannel,
-                PermissionFlagsBits.SendMessages,
-                PermissionFlagsBits.ReadMessageHistory,
-                PermissionFlagsBits.ManageMessages,
-                PermissionFlagsBits.ManageChannels,
-              ],
-            },
-            {
-              id: cfg.GERENTE_ROLE_ID,
-              allow: [
-                PermissionFlagsBits.ViewChannel,
-                PermissionFlagsBits.SendMessages,
-                PermissionFlagsBits.ReadMessageHistory,
-                PermissionFlagsBits.ManageMessages,
-                PermissionFlagsBits.ManageChannels,
-              ],
-            },
-          ],
-          topic: `Canal privado de ${interaction.user.tag} - ${opt.label}`,
-        });
+      modal.addComponents(new ActionRowBuilder().addComponents(qtyInput));
+      return interaction.showModal(modal);
+    }
+
+    if (interaction.isButton() && interaction.customId === "farm_clear") {
+      await interaction.deferReply({ ephemeral: true });
+
+      await ensureDraft(interaction.guild.id, interaction.channelId, interaction.user.id);
+      await clearDraft(interaction.guild.id, interaction.channelId, interaction.user.id);
+      await sendOrRefreshFarmPanel(interaction.channel, interaction.user.id);
+
+      return interaction.editReply("✅ Painel limpo.");
+    }
+
+    if (interaction.isButton() && interaction.customId === "farm_send") {
+      await interaction.deferReply({ ephemeral: true });
+
+      const remaining = await getCooldownRemaining(interaction.guild.id, interaction.user.id);
+      if (remaining > 0) {
+        return interaction.editReply({ content: `⏳ Aguarde **${remaining}s** para enviar outro farme.` });
       }
 
-      await upsertChannelMap(interaction.guild.id, interaction.user.id, selected, targetChannel.id);
+      await ensureDraft(interaction.guild.id, interaction.channelId, interaction.user.id);
+      const draft = await getDraft(interaction.guild.id, interaction.channelId, interaction.user.id);
+      if (!draft) return interaction.editReply("❌ Draft não encontrado.");
 
-      const fetched = await targetChannel.messages.fetch({ limit: 5 }).catch(() => null);
-      if (!fetched || fetched.size === 0) {
-        await targetChannel.send(
-          `👋 ${interaction.user}\n` +
-            `✅ Canal privado de **${opt.label}** criado.\n\n` +
-            `📌 Envie seu farme usando:\n` +
-            `**/enviarfarme quantidade: <número> print: <anexo>**`
-        ).catch(() => null);
+      const total = sumDraftQuantities(draft.quantities);
+      if (total <= 0) {
+        return interaction.editReply("❌ Preencha pelo menos uma quantidade antes de enviar.");
       }
 
-      const goBtn = new ButtonBuilder()
-        .setStyle(ButtonStyle.Link)
-        .setLabel("➡️ Ir para o canal")
-        .setURL(channelLink(interaction.guild.id, targetChannel.id));
+      const printUrl = await findLatestImageFromUser(interaction.channel, interaction.user.id);
+      if (!printUrl) {
+        return interaction.editReply("❌ Envie o **print/imagem** no canal antes de clicar em **ENVIAR**.");
+      }
 
-      return interaction.reply({
-        content: "✅ Canal pronto.",
-        components: [new ActionRowBuilder().addComponents(goBtn)],
-        ephemeral: true,
+      await setCooldown(interaction.guild.id, interaction.user.id);
+
+      const created = await createPendingRequestsFromDraft({
+        guild: interaction.guild,
+        channel: interaction.channel,
+        user: interaction.user,
+        quantities: draft.quantities,
+        printUrl,
       });
+
+      if (!created.length) {
+        return interaction.editReply("❌ Nada foi enviado.");
+      }
+
+      await clearDraft(interaction.guild.id, interaction.channelId, interaction.user.id);
+      await sendOrRefreshFarmPanel(interaction.channel, interaction.user.id);
+
+      const resumo = created.map((x) => `• **${x.itemLabel}**: ${x.quantidade}`).join("\n");
+
+      return interaction.editReply(
+        `✅ Enviado para avaliação do **00/Gerente**.\n\n${resumo}`
+      );
+    }
+
+    // MODAL QUANTIDADE DO PAINEL FARM
+    if (interaction.isModalSubmit() && interaction.customId.startsWith("farm_modal_qty:")) {
+      await interaction.deferReply({ ephemeral: true });
+
+      const itemValue = interaction.customId.split(":")[1];
+      const opt = FARME_OPTIONS.find((o) => o.value === itemValue);
+
+      if (!opt) return interaction.editReply("❌ Item inválido.");
+
+      const qty = parseInt((interaction.fields.getTextInputValue("qty") || "").trim(), 10);
+      if (!Number.isFinite(qty) || qty < 0) {
+        return interaction.editReply("❌ Quantidade inválida. Use um número 0 ou maior.");
+      }
+
+      await ensureDraft(interaction.guild.id, interaction.channelId, interaction.user.id);
+      await setDraftQuantity(interaction.guild.id, interaction.channelId, interaction.user.id, itemValue, qty);
+      await sendOrRefreshFarmPanel(interaction.channel, interaction.user.id);
+
+      return interaction.editReply(`✅ **${opt.label}** atualizado para **${qty}**.`);
     }
 
     // BOTÃO APROVAR
@@ -1368,11 +1704,8 @@ client.on("interactionCreate", async (interaction) => {
         [interaction.user.id, interaction.user.tag, interaction.guild.id, requestId]
       );
 
-      // quantidade real
       await addDailyTotals(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
       await addWeeklyTotals(interaction.guild.id, req.userId, req.itemValue, req.quantidade);
-
-      // rota do dia = conta só +1 por aprovação
       await addDailyRouteCount(interaction.guild.id, req.userId, req.itemValue, 1);
 
       const embed = makeRequestEmbed({
