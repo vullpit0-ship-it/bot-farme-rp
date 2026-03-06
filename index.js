@@ -686,7 +686,7 @@ async function getApprovedCount(guildId, dateKey, userId, itemValue) {
   return Number(rows[0]?.total || 0);
 }
 
-async function missStreakUntil(guildId, dateKey, userId, itemValue, maxLookbackDays = 120) {
+async function missStreakUntil(guildId, dateKey, userId, itemValue, maxLookbackDays = 15) {
   const base = DateTime.fromISO(dateKey, { zone: TZ });
   if (!base.isValid) return 0;
 
