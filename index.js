@@ -130,6 +130,22 @@ const PANEL_PREFIX_DAILY = "panel_daily:";
 const PANEL_PREFIX_WEEKLY = "panel_weekly:";
 const FARM_CHANNEL_ITEMVALUE = "__farm_panel__";
 
+// ===== NOVO: PAINEL DE DEVEDORES =====
+const DEVEDORES_PANEL_KEY = "panel_devedores";
+const DEVEDORES_META_DIARIA_POR_ITEM = 2;
+
+const DEVEDORES_TRACKED_ROLE_IDS = {
+  [GUILD_ID_TESTE]: [],
+
+  [GUILD_ID_NOVA_ORDEM]: [
+    "1469111029144223913",
+    "1486126837183545434",
+    "1469111029161136392",
+    "1469111029161136391",
+    "1469111029161136387",
+  ],
+};
+
 // ======================================================
 // 🤖 CLIENT
 // ======================================================
@@ -345,6 +361,156 @@ function splitIntoPages(rows, maxLen = 3500) {
   return pages;
 }
 
+// ===== NOVO: HELPERS DE DEVEDORES =====
+function getDevedoresTrackedRoleIds(guildId) {
+  return DEVEDORES_TRACKED_ROLE_IDS[guildId] || [];
+}
+
+function getCurrentWeeklyDebtWindow() {
+  const now = DateTime.now().setZone(TZ);
+
+  let weekStart = now.startOf("week").set({
+    hour: 0,
+    minute: 5,
+    second: 0,
+    millisecond: 0,
+  });
+
+  let effectiveNow = now;
+
+  if (now < weekStart) {
+    effectiveNow = now.minus({ weeks: 1 });
+    weekStart = effectiveNow.startOf("week").set({
+      hour: 0,
+      minute: 5,
+      second: 0,
+      millisecond: 0,
+    });
+  }
+
+  const todayKey = effectiveNow.toISODate();
+  const weekStartKey = weekStart.toISODate();
+
+  const expectedDays = Math.max(
+    1,
+    Math.min(
+      7,
+      Math.floor(
+        effectiveNow.startOf("day").diff(weekStart.startOf("day"), "days").days
+      ) + 1
+    )
+  );
+
+  const expectedPerItem = expectedDays * DEVEDORES_META_DIARIA_POR_ITEM;
+
+  return {
+    now: effectiveNow,
+    weekStart,
+    todayKey,
+    weekStartKey,
+    expectedDays,
+    expectedPerItem,
+    periodText: `${weekStart.toFormat("dd/MM/yyyy HH:mm")} até ${effectiveNow.toFormat("dd/MM/yyyy HH:mm")}`,
+  };
+}
+
+function buildDevedoresMainPanelEmbed(guildName) {
+  return new EmbedBuilder()
+    .setTitle("📋 Painel de Cobrança Semanal")
+    .setDescription(
+      [
+        `Servidor: **${guildName}**`,
+        "",
+        `• Meta: **${DEVEDORES_META_DIARIA_POR_ITEM} rotas por dia por item**`,
+        `• Itens obrigatórios: **Pasta Base, Estabilizador, Saco Ziplock, Folha Bruta**`,
+        `• Reinício: **segunda às 00:05**`,
+        "",
+        "Clique em **Iniciar** para consultar os relatórios.",
+      ].join("\n")
+    )
+    .setTimestamp(new Date());
+}
+
+function buildDevedoresMainButtons() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("devedores_iniciar")
+        .setLabel("Iniciar")
+        .setStyle(ButtonStyle.Primary)
+    ),
+  ];
+}
+
+function buildDevedoresMenuEmbed(info) {
+  return new EmbedBuilder()
+    .setTitle("📊 Consulta Semanal de Rotas")
+    .setDescription(
+      [
+        `**Período:** ${info.periodText}`,
+        `**Meta atual por item:** ${info.expectedPerItem}`,
+        "",
+        "Escolha uma das opções abaixo:",
+      ].join("\n")
+    )
+    .setTimestamp(new Date());
+}
+
+function buildDevedoresMenuButtons() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("devedores_fez_todas")
+        .setLabel("Fez todas")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId("devedores_fez_parcial")
+        .setLabel("Fez parcial")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId("devedores_nao_fez")
+        .setLabel("Não fez")
+        .setStyle(ButtonStyle.Danger)
+    ),
+  ];
+}
+
+function classifyWeeklyDebtMember(summary) {
+  const doneValues = FARME_OPTIONS.map((o) => summary.items[o.value]?.done || 0);
+  const allZero = doneValues.every((n) => n === 0);
+  const allMet = FARME_OPTIONS.every((o) => (summary.items[o.value]?.debt || 0) <= 0);
+
+  if (allZero) return "nao_fez";
+  if (allMet) return "fez_todas";
+  return "fez_parcial";
+}
+
+function formatWeeklyDebtMember(summary, expectedPerItem, mode) {
+  const mention = `<@${summary.userId}>`;
+  const header = `**${summary.displayName}** (${mention})`;
+
+  if (mode === "fez_todas") {
+    const lines = FARME_OPTIONS.map((o) => {
+      const done = summary.items[o.value]?.done || 0;
+      return `• **${o.label}:** ${done}/${expectedPerItem} ✅`;
+    });
+    return `${header}\n${lines.join("\n")}`;
+  }
+
+  if (mode === "nao_fez") {
+    return `${header}\n• Não fez nenhuma rota nesta semana.`;
+  }
+
+  const lines = FARME_OPTIONS.map((o) => {
+    const item = summary.items[o.value] || { done: 0, debt: expectedPerItem };
+    const icon = item.done >= expectedPerItem ? "✅" : item.done > 0 ? "⚠️" : "❌";
+    const debtText = item.debt > 0 ? ` — devendo **${item.debt}**` : "";
+    return `• **${o.label}:** ${item.done}/${expectedPerItem} ${icon}${debtText}`;
+  });
+
+  return `${header}\n${lines.join("\n")}`;
+}
+
 function makeRequestEmbed({ userTag, userId, itemLabel, quantidade, status, approverTag, reason, adjustedInfo }) {
   const embed = new EmbedBuilder()
     .setTitle("📦 Solicitação de Farme")
@@ -416,6 +582,7 @@ function getHelpEmbedFor(member, cfg) {
     { name: "/gerenciarcanal", desc: "Painel staff para fechar/encerrar o canal atual." },
     { name: "/rotas", desc: "Mostra as rotas de hoje de um membro." },
     { name: "/faltando", desc: "Mostra há quantos dias o membro está sem cada rota." },
+    { name: "/devedores", desc: "Abre/atualiza o painel de cobrança semanal." },
   ];
 
   const extra00Cmds = [
@@ -807,6 +974,175 @@ async function getFixedMessagesByPrefix(guildId, prefix) {
     [guildId, `${prefix}%`]
   );
   return rows;
+}
+
+// ===== NOVO: DB HELPERS DE DEVEDORES =====
+async function getWeeklyRouteSums(guildId, userIds, startDateKey, endDateKey) {
+  if (!userIds.length) return [];
+
+  const { rows } = await pool.query(
+    `
+    SELECT "userId", "itemValue", COALESCE(SUM(total), 0)::int AS total
+    FROM farme_daily_routes
+    WHERE "guildId" = $1
+      AND "dateKey" >= $2
+      AND "dateKey" <= $3
+      AND "userId" = ANY($4)
+    GROUP BY "userId", "itemValue"
+    `,
+    [guildId, startDateKey, endDateKey, userIds]
+  );
+
+  return rows;
+}
+
+async function getDebtTrackedMembers(guild) {
+  await guild.members.fetch().catch(() => null);
+
+  const trackedRoleIds = getDevedoresTrackedRoleIds(guild.id);
+  if (!trackedRoleIds.length) return [];
+
+  const members = guild.members.cache.filter((member) => {
+    if (!member || member.user?.bot) return false;
+    return trackedRoleIds.some((roleId) => member.roles?.cache?.has(roleId));
+  });
+
+  return [...members.values()].sort((a, b) =>
+    (a.displayName || a.user.username).localeCompare(
+      b.displayName || b.user.username,
+      "pt-BR",
+      { sensitivity: "base" }
+    )
+  );
+}
+
+async function buildWeeklyDebtDataset(guild) {
+  const info = getCurrentWeeklyDebtWindow();
+  const members = await getDebtTrackedMembers(guild);
+  const userIds = members.map((m) => m.id);
+
+  const sums = await getWeeklyRouteSums(
+    guild.id,
+    userIds,
+    info.weekStartKey,
+    info.todayKey
+  );
+
+  const byUser = new Map();
+
+  for (const member of members) {
+    const items = {};
+    for (const o of FARME_OPTIONS) {
+      items[o.value] = {
+        done: 0,
+        debt: info.expectedPerItem,
+      };
+    }
+
+    byUser.set(member.id, {
+      userId: member.id,
+      displayName: member.displayName || member.user.username,
+      items,
+    });
+  }
+
+  for (const row of sums) {
+    const user = byUser.get(row.userId);
+    if (!user) continue;
+
+    const done = Math.max(0, Number(row.total || 0));
+    user.items[row.itemValue] = {
+      done,
+      debt: Math.max(0, info.expectedPerItem - done),
+    };
+  }
+
+  const all = [...byUser.values()].map((summary) => ({
+    ...summary,
+    className: classifyWeeklyDebtMember(summary),
+  }));
+
+  return {
+    info,
+    all,
+    fezTodas: all.filter((x) => x.className === "fez_todas"),
+    fezParcial: all.filter((x) => x.className === "fez_parcial"),
+    naoFez: all.filter((x) => x.className === "nao_fez"),
+  };
+}
+
+function buildWeeklyDebtEmbeds({ guildName, info, members, mode }) {
+  const titleMap = {
+    fez_todas: "✅ Fez todas",
+    fez_parcial: "⚠️ Fez parcial",
+    nao_fez: "❌ Não fez",
+  };
+
+  if (!members.length) {
+    return [
+      new EmbedBuilder()
+        .setTitle(titleMap[mode])
+        .setDescription(
+          [
+            `Servidor: **${guildName}**`,
+            `Período: **${info.periodText}**`,
+            `Meta por item até agora: **${info.expectedPerItem}**`,
+            "",
+            "Nenhum membro encontrado nesta categoria.",
+          ].join("\n")
+        )
+        .setTimestamp(new Date()),
+    ];
+  }
+
+  const blocks = members.map((m) => formatWeeklyDebtMember(m, info.expectedPerItem, mode));
+  const pages = splitIntoPages(blocks, 3500);
+
+  return pages.slice(0, 10).map((page, index) =>
+    new EmbedBuilder()
+      .setTitle(`${titleMap[mode]}${pages.length > 1 ? ` — Página ${index + 1}/${pages.length}` : ""}`)
+      .setDescription(
+        [
+          `Servidor: **${guildName}**`,
+          `Período: **${info.periodText}**`,
+          `Meta por item até agora: **${info.expectedPerItem}**`,
+          "",
+          page,
+        ].join("\n")
+      )
+      .setTimestamp(new Date())
+  );
+}
+
+async function sendOrUpdateDevedoresPanel(guild) {
+  const cfg = getCfg(guild.id);
+  if (!cfg?.REPORT_CHANNEL_ID) return null;
+
+  const channel = await guild.channels.fetch(cfg.REPORT_CHANNEL_ID).catch(() => null);
+  if (!channel || !channel.isTextBased()) return null;
+
+  const embed = buildDevedoresMainPanelEmbed(guild.name);
+  const components = buildDevedoresMainButtons();
+
+  const existingId = await getFixedMessage(guild.id, DEVEDORES_PANEL_KEY);
+  if (existingId) {
+    const msg = await channel.messages.fetch(existingId).catch(() => null);
+    if (msg) {
+      await msg.edit({ content: null, embeds: [embed], components }).catch(() => null);
+      return msg;
+    }
+  }
+
+  const created = await channel.send({
+    embeds: [embed],
+    components,
+  }).catch(() => null);
+
+  if (created) {
+    await setFixedMessage(guild.id, DEVEDORES_PANEL_KEY, created.id);
+  }
+
+  return created;
 }
 
 async function ensureDraft(guildId, channelId, userId) {
@@ -1333,6 +1669,10 @@ const commands = [
       opt.setName("valor").setDescription("Valor do ajuste").setRequired(true)
     ),
 
+  new SlashCommandBuilder()
+    .setName("devedores")
+    .setDescription("(Staff) Cria/atualiza o painel fixo de cobrança semanal no canal de relatório."),
+
   new SlashCommandBuilder().setName("ajuda").setDescription("Mostra os comandos disponíveis para o seu cargo."),
 ].map((c) => c.toJSON());
 
@@ -1366,6 +1706,11 @@ client.once("clientReady", async () => {
     { timezone: TZ }
   );
 
+  for (const guild of client.guilds.cache.values()) {
+    if (!getCfg(guild.id)) continue;
+    await sendOrUpdateDevedoresPanel(guild).catch(() => null);
+  }
+
   console.log(`Jobs ativos: reset diário 00:05 e reset semanal segunda 00:05 (${TZ})`);
 });
 
@@ -1396,6 +1741,26 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const embed = getHelpEmbedFor(member, cfg);
       return interaction.editReply({ embeds: [embed] });
+    }
+
+    // /devedores
+    if (interaction.isChatInputCommand() && interaction.commandName === "devedores") {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      if (!isStaff(member, cfg)) {
+        return interaction.editReply({ content: "❌ Apenas 00/Gerente." });
+      }
+
+      const msg = await sendOrUpdateDevedoresPanel(interaction.guild);
+      if (!msg) {
+        return interaction.editReply({
+          content: "❌ Não consegui criar/atualizar o painel no canal de relatório.",
+        });
+      }
+
+      return interaction.editReply({
+        content: `✅ Painel de cobrança semanal criado/atualizado em <#${cfg.REPORT_CHANNEL_ID}>.`,
+      });
     }
 
     // /rotas
@@ -1645,6 +2010,70 @@ client.on("interactionCreate", async (interaction) => {
         .setTimestamp(new Date());
 
       return interaction.editReply({ embeds: [embed] });
+    }
+
+    // BOTÃO: painel devedores -> iniciar
+    if (interaction.isButton() && interaction.customId === "devedores_iniciar") {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      if (!isStaff(member, cfg)) {
+        return interaction.editReply("❌ Apenas 00/Gerente.");
+      }
+
+      const info = getCurrentWeeklyDebtWindow();
+
+      return interaction.editReply({
+        embeds: [buildDevedoresMenuEmbed(info)],
+        components: buildDevedoresMenuButtons(),
+      });
+    }
+
+    // BOTÕES: fez todas / fez parcial / não fez
+    if (
+      interaction.isButton() &&
+      ["devedores_fez_todas", "devedores_fez_parcial", "devedores_nao_fez"].includes(interaction.customId)
+    ) {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      if (!isStaff(member, cfg)) {
+        return interaction.editReply("❌ Apenas 00/Gerente.");
+      }
+
+      const dataset = await buildWeeklyDebtDataset(interaction.guild);
+
+      let embeds = [];
+
+      if (interaction.customId === "devedores_fez_todas") {
+        embeds = buildWeeklyDebtEmbeds({
+          guildName: interaction.guild.name,
+          info: dataset.info,
+          members: dataset.fezTodas,
+          mode: "fez_todas",
+        });
+      }
+
+      if (interaction.customId === "devedores_fez_parcial") {
+        embeds = buildWeeklyDebtEmbeds({
+          guildName: interaction.guild.name,
+          info: dataset.info,
+          members: dataset.fezParcial,
+          mode: "fez_parcial",
+        });
+      }
+
+      if (interaction.customId === "devedores_nao_fez") {
+        embeds = buildWeeklyDebtEmbeds({
+          guildName: interaction.guild.name,
+          info: dataset.info,
+          members: dataset.naoFez,
+          mode: "nao_fez",
+        });
+      }
+
+      return interaction.editReply({
+        embeds,
+        components: buildDevedoresMenuButtons(),
+      });
     }
 
     // BOTÕES DO PAINEL FARM
